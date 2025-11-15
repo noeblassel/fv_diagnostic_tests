@@ -52,16 +52,16 @@ function run_tournament!(candidates;
         val_scores = Float64[]
         val_ixs = Int[]
 
-        for (ix,i)=alive
-                println(" Training candidate $i  ($ix/$(length(alive))) ... (id=$(candidates[i].id)) ")
-                run_epoch!(candidates[i], train_batches)
+        for (i,ix)=enumerate(alive)
+                println(" Training candidate $ix  ($i/$(length(alive))) ... (id=$(candidates[ix].id)) ")
+                run_epoch!(candidates[ix], train_batches)
 
-                acc, loss = test_accuracy!(candidates[i], test_batches)
+                acc, loss = test_accuracy!(candidates[ix], test_batches)
 
                 println("Validation accuracies (50% → 90% decision thresholds):",acc)
                 println("Validation loss : ",loss)
                 push!(val_scores,loss) # primary metric: test loss
-                push!(val_ixs, i)
+                push!(val_ixs, ix)
         end
 
         p = sortperm(val_scores)
