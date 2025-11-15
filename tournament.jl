@@ -52,8 +52,8 @@ function run_tournament!(candidates;
         val_scores = Float64[]
         val_ixs = Int[]
 
-        for i=alive
-                println(" Training candidate $i / $n ... (id $(candidates[i].id)) ")
+        for (ix,i)=alive
+                println(" Training candidate $i  ($ix/$(length(alive))) ... (id=$(candidates[i].id)) ")
                 run_epoch!(candidates[i], train_batches)
 
                 acc, loss = test_accuracy!(candidates[i], test_batches)
@@ -72,5 +72,5 @@ function run_tournament!(candidates;
         alive = sort(val_ixs[p[1:n_survivors]])
     end
 
-    return first(alive)
+    return candidates[first(alive)]
 end
