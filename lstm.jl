@@ -81,7 +81,8 @@ mutable struct RNNDiagnosticHyperParams
 end
 
 function RNNDiagnostic(hyperparams::RNNDiagnosticHyperParams; input_dim::Int=64, rng=Random.GLOBAL_RNG)
-    cnn_nchannels = @. 2^(0:(hyperparams.cnn_depth-1) + hyperparams.cnn_width_exponent)
+    
+    cnn_nchannels = [2^i for i=hyperparams.cnn_width_exponent:(hyperparams.cnn_width_exponent+hyperparams.cnn_depth-1)]
     cnn_kernel_dims = fill((5,), hyperparams.cnn_depth)
 
     dims_rnn = fill(2^(hyperparams.rnn_width_exponent), hyperparams.rnn_depth)

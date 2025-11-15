@@ -5,11 +5,11 @@ using Flux,JLD2
 
 lrs = [1e-3]
 cnn_depth_range = 3:5
-cnn_width_exponent_range = 4:6
-rnn_depth_range = 1:1
-rnn_width_exponent_range = 5:7
+cnn_width_exponent_range = 3:4
+rnn_depth_range = 1:2
+rnn_width_exponent_range = 5:6
 mlp_depth_range = 1:2
-mlp_width_exponent_range = 5:7
+mlp_width_exponent_range = 5:6
 
 
 candidates = [build_candidate_run((lr, cd, cw, rd, rw, md, mw);base_seed = 2022)
@@ -25,7 +25,6 @@ open("model_summaries.out","w") do f
         println(f,repr("text/plain",m.model))
     end
 end
-
 
 io = open("tournament_log.out","w")
 best_hope = run_tournament!(candidates,train_batches=50,test_batches=20,io=io)

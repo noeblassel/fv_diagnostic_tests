@@ -13,6 +13,7 @@ function build_candidate_run(hyp;
     rng = Xoshiro(seed)
 
     h = RNNDiagnosticHyperParams(cd, cw, rd, rw, md, mw)
+
     model = RNNDiagnostic(h; input_dim=input_dim, rng=rng)
 
     opt = Adam(lr)
