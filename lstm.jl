@@ -31,20 +31,21 @@ function RNNDiagnostic(; input_dim::Int=64,
     cnn_output_dim = prod(Flux.outputsize(cnn_encoder, (input_dim, 1, 1)))
 
     rnn_layers = []
-    input_dim = cnn_output_dim
+    input_dim_rnn = cnn_output_dim
 
-    for output_dim = dims_rnn
-        push!(rnn_layers, LSTM(input_dim => output_dim, init_kernel=initializer, init_recurrent_kernel=initializer))
+    for output_dim_rnn = dims_rnn
+        push!(rnn_layers, LSTM(input_dim_rnn => output_dim_rnn, init_kernel=initializer, init_recurrent_kernel=initializer))
+        input_dim_rnn = output_dim_rnn
     end
 
     rnn = Chain(rnn_layers...)
 
     mlp_layers = []
-    input_dim = last(dims_rnn)
+    input_dim_mlp = last(dims_rnn)
 
-    for output_dim = dims_mlp
-        push!(mlp_layers, Dense(input_dim => output_dim, leakyrelu, init=initializer))
-        input_dim = output_dim
+    for output_dim_mlp = dims_mlp
+        push!(mlp_layers, Dense(input_dim_mlp => output_dim_mlp, leakyrelu, init=initializer))
+        input_dim_mlp = output_dim_mlp
     end
 
     mlp = Chain(mlp_layers..., Dense(last(dims_mlp) => 1, init=initializer))
@@ -83,7 +84,7 @@ function RNNDiagnostic(hyperparams::RNNDiagnosticHyperParams; input_dim::Int=64,
     cnn_nchannels = @. 2^(0:(hyperparams.cnn_depth-1) + hyperparams.cnn_width_exponent)
     cnn_kernel_dims = fill((5,), hyperparams.cnn_depth)
 
-    dims_rnn = @. 2^(0:(hyperparams.rnn_depth-1) + hyperparams.rnn_width_exponent)
+    dims_rnn = fill(2^(hyperparams.rnn_width_exponent), hyperparams.rnn_depth)
 
     dims_mlp = fill(2^(hyperparams.mlp_width_exponent), hyperparams.mlp_depth)
 
