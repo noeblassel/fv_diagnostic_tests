@@ -38,7 +38,7 @@ function run_tournament!(candidates;
         max_epochs = 100,
         reduction_factor = 2,
         train_batches = 20,
-        test_batches = 20)
+        test_batches = 20;io=stdout)
 
     n = length(candidates)
     alive = collect(1:n)
@@ -47,26 +47,28 @@ function run_tournament!(candidates;
 
     while length(alive) > 1
         round += 1
-        println("\n=== Round $round: # candidate configs=$(length(alive))")
+        println(io,"\n=== Round $round: # candidate configs=$(length(alive))")
 
         val_scores = Float64[]
         val_ixs = Int[]
 
         for (i,ix)=enumerate(alive)
-                println(" Training candidate $ix  ($i/$(length(alive))) ... (id=$(candidates[ix].id)) ")
+                println(io," Training candidate $ix  ($i/$(length(alive))) ... (id=$(candidates[ix].id)) ")
                 run_epoch!(candidates[ix], train_batches)
 
                 acc, loss = test_accuracy!(candidates[ix], test_batches)
 
-                println("Validation accuracies (50% → 90% decision thresholds):",acc)
-                println("Validation loss : ",loss)
+                println(io,"Validation accuracies (50% → 90% decision thresholds):",acc)
+                println(io,"Validation loss : ",loss)
                 push!(val_scores,loss) # primary metric: test loss
                 push!(val_ixs, ix)
+
+                flush(io)
         end
 
         p = sortperm(val_scores)
 
-        println("Min loss: $(minimum(val_scores)). Max loss: $(maximum(val_scores)). Mean loss $(mean(val_scores))")
+        println(io,"Min loss: $(minimum(val_scores)). Max loss: $(maximum(val_scores)). Mean loss $(mean(val_scores))")
 
         n_survivors = max(1, fld(length(alive), reduction_factor))
         alive = sort(val_ixs[p[1:n_survivors]])
