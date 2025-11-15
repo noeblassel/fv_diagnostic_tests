@@ -3,12 +3,12 @@ include("FVDiagnosticTests.jl")
 using .FVDiagnosticTests
 
 lrs = [1e-3]
-cnn_depth_range = 3:5
+cnn_depth_range = 3:4 #3:5
 cnn_width_exponent_range = 4:6
 rnn_depth_range = 1:1
-rnn_width_exponent_range = 5:7
-mlp_depth_range = 1:2
-mlp_width_exponent_range = 5:7
+rnn_width_exponent_range = 5:5 #5:7
+mlp_depth_range = 1:1 #1:2
+mlp_width_exponent_range = 5:5 #5:7
 
 
 candidates = [build_candidate_run((lr, cd, cw, rd, rw, md, mw))
@@ -25,5 +25,5 @@ open("model_summaries.out","w") do f
     end
 end
 
-best_hope = run_tournament!(candidates)
+best_hope = run_tournament!(candidates,train_batches=5,test_batches=5)
 JLD2.jldsave("best_hope.jld2", model_state=Flux.state(best_hope.model)) # checkpoint model state

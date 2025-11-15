@@ -1,7 +1,7 @@
 function build_candidate_run(hyp;
         base_seed = 2025,
         input_dim = 64,
-        βlims = (1.0,4.0),
+        βlims = (1.0,3.0),
         pot_per_batch = 5,
         trace_per_pot = 5,
         cut_per_trace = 1,
@@ -41,7 +41,7 @@ function run_tournament!(candidates;
         test_batches = 20)
 
     n = length(candidates)
-    alive = Set(1:n)
+    alive = collect(1:n)
     @assert n > 0 "No candidates supplied"
     round = 0
 
@@ -53,10 +53,13 @@ function run_tournament!(candidates;
         val_ixs = Int[]
 
         for i=alive
-                println(" Training candidate $i / $n ... ")
+                println(" Training candidate $i / $n ... (id $(candidates[i].id)) ")
                 run_epoch!(candidates[i], train_batches)
 
                 acc, loss = test_accuracy!(candidates[i], test_batches)
+
+                println("Validation accuracies (50% → 90% decision thresholds):",acc)
+                println("Validation loss : ",loss)
                 push!(val_scores,loss) # primary metric: test loss
                 push!(val_ixs, i)
         end
@@ -66,7 +69,7 @@ function run_tournament!(candidates;
         println("Min loss: $(minimum(val_scores)). Max loss: $(maximum(val_scores)). Mean loss $(mean(val_scores))")
 
         n_survivors = max(1, fld(length(alive), reduction_factor))
-        alive = Set( val_ixs[p[1:n_survivors]] )
+        alive = sort(val_ixs[p[1:n_survivors]])
     end
 
     return first(alive)
