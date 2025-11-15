@@ -38,7 +38,8 @@ function run_tournament!(candidates;
         max_epochs = 100,
         reduction_factor = 2,
         train_batches = 20,
-        test_batches = 20;io=stdout)
+        test_batches = 20,
+        io=stdout)
 
     n = length(candidates)
     alive = collect(1:n)
