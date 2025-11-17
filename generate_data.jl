@@ -334,7 +334,7 @@ function get_batch(rng;
         ν, gap = comp_qsd(W, β, L)
         P = exp(-(stride * dt) * Matrix(L)) # killed semigroup -- minus sign because comp_generator returns the negative generator
 
-        attempts = 0                # total failed attempts for this potential
+        failed_attempts = 0                # total failed attempts for this potential
         potential_failed = false   # flag to skip to next potential if too many failures
 
         for j = 1:ntrace
@@ -343,20 +343,20 @@ function get_batch(rng;
             decorr_step = -1
 
             while !success
-                attempts += 1
                 try
                     ix = rand(rng, 1:Ngrid)
                     x0 = (ix + 1) / (Ngrid + 2)
                     decorr_step = max(2,conv_tv(P, ν, ix, tol))
-
+                    
                     fv_frames = sim_fv(W′, D, D′, dt, β, Nreplicas, 2*decorr_step * stride,stride, x0, rng)
                     (length(fv_frames) >= min_length) && (success = true)
                 catch e
+                    failed_attempts += 1
                     @warn "Extinction event during Fleming-Viot simulation, retrying..." exception=(e,catch_backtrace())
                     # If we've retried too many times for this potential, give up and move on
                 end
 
-                if attempts >= max_attempts
+                if failed_attempts >= max_attempts
                     @info "Exceeded maximum attempts ($max_attempts) for this potential — skipping to next potential"
                     potential_failed = true
                     break
@@ -370,7 +370,6 @@ function get_batch(rng;
             # process successful trace
             features = Vector{Float32}[]
             l = length(fv_frames)
-            s_max = l - min_length + 1
 
             for f = fv_frames
                 push!(features, feature(f,input_dim))
@@ -378,12 +377,25 @@ function get_batch(rng;
 
             full_labels = (1:l .> decorr_step)
 
+            valid_lengths = min_length:l
+            weights = Weights(valid_lengths) # favor longer sequences
+
             for k=1:ncut
-                s = rand(rng, 1:s_max)
-                e_min = s + min_length - 1
-                e = rand(rng, e_min:l)
+                len = sample(rng,valid_lengths,weights)
+
+                local s,e
+
+                if rand(rng) < 0.5
+                    s = 1
+                    e = len
+                else
+                    s = l - len + 1
+                    e = l
+                end
+
                 push!(batch, features[s:e])
                 push!(labels, Float32.(full_labels[s:e]))
+
             end
         end
 
