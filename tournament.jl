@@ -72,7 +72,7 @@ function run_tournament!(candidates;
 
         println(io,"Min loss: $(minimum(val_scores)). Max loss: $(maximum(val_scores)). Mean loss $(mean(val_scores))")
 
-        n_survivors = max(1, fld(length(alive), reduction_factor))
+        n_survivors = max(1, cld(length(alive), reduction_factor))
         alive = sort(val_ixs[p[1:n_survivors]])
     end
 
