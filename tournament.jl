@@ -4,7 +4,7 @@ function build_candidate_run(hyp;
         βlims = (1.0,3.0),
         pot_per_batch = 5,
         trace_per_pot = 5,
-        cut_per_trace = 1,
+        cut_per_trace = 2,
         feature = hist_feature)
 
     lr, cd, cw, rd, rw, md, mw = hyp

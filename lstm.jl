@@ -8,7 +8,7 @@ end
 Flux.@layer RNNDiagnostic
 
 function RNNDiagnostic(; input_dim::Int=64,
-    cnn_kernel_dims::Vector{Tuple{Int}}=[(5,),(5,),(5,)],
+    cnn_kernel_dims::Vector{Int}=[5,5,5],
     cnn_nchannels::Vector{Int}=[16,32,64],
     dims_rnn::Vector{Int}=[64],
     dims_mlp::Vector{Int}=[64, 32],
@@ -20,8 +20,8 @@ function RNNDiagnostic(; input_dim::Int=64,
     in_channels = 1
 
     for (kernel_size, out_channels) = zip(cnn_kernel_dims, cnn_nchannels)
-        pad_size = div(kernel_size[1]-1,2)
-        push!(cnn_layers, Conv(kernel_size, in_channels => out_channels,pad=pad_size, leakyrelu, init=initializer))
+        pad_size = div(kernel_size-1,2)
+        push!(cnn_layers, Conv(tuple(kernel_size), in_channels => out_channels,pad=pad_size, leakyrelu, init=initializer))
         push!(cnn_layers, MaxPool((2,)))
         in_channels = out_channels
     end
@@ -83,7 +83,7 @@ end
 function RNNDiagnostic(hyperparams::RNNDiagnosticHyperParams; input_dim::Int=64, rng=Random.GLOBAL_RNG)
     
     cnn_nchannels = [2^i for i=hyperparams.cnn_width_exponent:(hyperparams.cnn_width_exponent+hyperparams.cnn_depth-1)]
-    cnn_kernel_dims = fill((5,), hyperparams.cnn_depth)
+    cnn_kernel_dims = fill(5, hyperparams.cnn_depth)
 
     dims_rnn = fill(2^(hyperparams.rnn_width_exponent), hyperparams.rnn_depth)
 
