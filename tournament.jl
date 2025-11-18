@@ -50,12 +50,15 @@ function run_tournament!(candidates;
     while length(alive) > 1
         round += 1
         println(io,"\n=== Round $round: # candidate configs=$(length(alive))")
+        println("=== Round $round: # candidate configs=$(length(alive))")
 
         val_scores = Float64[]
         val_ixs = Int[]
 
         for (i,ix)=enumerate(alive)
                 println(io," Training candidate $ix  ($i/$(length(alive))) ... (id=$(candidates[ix].id)) ")
+                println(" Training candidate $ix  ($i/$(length(alive))) ... (id=$(candidates[ix].id))")
+                flush(stdout)
                 run_epoch!(candidates[ix], train_batches)
 
                 acc, loss = test_accuracy!(candidates[ix], test_batches)
@@ -69,8 +72,9 @@ function run_tournament!(candidates;
         end
 
         p = sortperm(val_scores)
+        m,M = extrema(val_scores)
 
-        println(io,"Min loss: $(minimum(val_scores)). Max loss: $(maximum(val_scores)). Mean loss $(mean(val_scores))")
+        println(io,"Min loss: $(m). Max loss: $(M). Mean loss $(mean(val_scores))")
 
         n_survivors = max(1, cld(length(alive), reduction_factor))
         alive = sort(val_ixs[p[1:n_survivors]])

@@ -27,5 +27,5 @@ open("model_summaries.out","w") do f
 end
 
 io = open("tournament_log.out","w")
-best_hope = run_tournament!(candidates,train_batches=50,test_batches=20,io=io)
+best_hope = run_tournament!(candidates,train_batches=100,test_batches=50,io=io)
 JLD2.jldsave("best_hope.jld2", model_state=Flux.state(best_hope.model)) # checkpoint model state
