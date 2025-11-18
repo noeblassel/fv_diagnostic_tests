@@ -349,10 +349,16 @@ function get_batch(rng;
                     decorr_step = max(2,conv_tv(P, ν, ix, tol))
                     
                     fv_frames = sim_fv(W′, D, D′, dt, β, Nreplicas, 2*decorr_step * stride,stride, x0, rng)
-                    (length(fv_frames) >= min_length) && (success = true)
+
+                    if length(fv_frames) >= min_length
+                        success = true
+                    else
+                        failed_attempts += 1
+                    end
+
                 catch e
                     failed_attempts += 1
-                    @warn "Extinction event during Fleming-Viot simulation, retrying..." exception=(e,catch_backtrace())
+                    @warn "Fleming-Viot run failed..." exception=(e,catch_backtrace())
                     # If we've retried too many times for this potential, give up and move on
                 end
 
