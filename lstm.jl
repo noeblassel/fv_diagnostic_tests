@@ -96,3 +96,50 @@ function RNNDiagnostic(hyperparams::RNNDiagnosticHyperParams; input_dim::Int=64,
         dims_mlp=dims_mlp,
         rng=rng)
 end
+
+
+"""
+Similar to 
+"""
+mutable struct RNNDiagnosticOnline{S<:Chain,T<:Chain,U<:Chain,V}
+    cnn_encoder::S
+    cnn_output_dim::Int
+    rnn_cells::T
+    mlp_head::U
+    rnn_state::V
+end
+
+function RNNDiagnosticOnline(model::RNNDiagnostic)
+
+    rnn_cells = [layer.cell for layer=model.rnn.layers]
+    dims_rnn = [size(cell.bias,1) ÷ 4 for cell=rnn_cells]
+    rnn_state = [(zeros(Float32,d),zeros(Float32,d)) for d=dims_rnn] # hidden and cell states
+
+    RNNDiagnosticOnline(model.cnn_encoder,model.cnn_output_dim,rnn_cells,model.mlp_head,rnn_state)
+end
+
+function reset_state!(model::RNNDiagnosticOnline)
+    model.rnn_state = [(zero(h),zero(c)) for (c,h)=model.rnn_state]
+end
+
+function (m::RNNDiagnosticOnline)(x)
+    @assert ndims(x) == 1 "RNNDiagnosticOnline only"
+    input_dim = size(x,1)
+    
+end
+
+function (m::RNNDiagnostic)(x)
+    @assert ndims(x) == 3 "Input size error: expected data in format (input_dim,sequence_length,batch_size)"
+
+    input_dim, sequence_length, batch_size = size(x)
+    x = reshape(x, input_dim, 1, sequence_length * batch_size)
+
+    z = m.cnn_encoder(x)
+    z = reshape(z, m.cnn_output_dim, sequence_length, batch_size)
+
+    h = m.rnn(z)
+
+    yhat_logits = m.mlp_head(h) # (1,sequence_length,batch_size) -- ouput logits
+    return reshape(yhat_logits, sequence_length, batch_size)
+end
+

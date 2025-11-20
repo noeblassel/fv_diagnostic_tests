@@ -359,7 +359,6 @@ function get_batch(rng;
                 catch e
                     failed_attempts += 1
                     @warn "Fleming-Viot run failed..." exception=(e,catch_backtrace())
-                    # If we've retried too many times for this potential, give up and move on
                 end
 
                 if failed_attempts >= max_attempts
