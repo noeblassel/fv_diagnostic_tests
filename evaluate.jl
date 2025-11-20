@@ -213,7 +213,7 @@ results = eval_metrics(model;
     num_samples=num_chunks,
     npot_per_chunk=5,
     ntrace=5,
-    ncut=2,
+    ncut=10,
     time_bins=time_bins,
     thr_vals=thr_values,
     rng=rng
@@ -273,7 +273,7 @@ savefig("$(prefix)_acc_time.pdf")
 dt = 1e-3
 stride = 50
 
-histogram(results.decorr_steps*dt*stride, normalize=true, xlabel=L"t_{\mathrm{corr}}", ylabel="Frequency",label="",yaxis=:log)
+histogram(results.decorr_steps*dt*stride, normalize=true, xlabel=L"t_{\mathrm{corr}}", ylabel="Frequency",label="")
 savefig("$(prefix)_decorr_times.pdf")
 
 # using DelimitedFiles
