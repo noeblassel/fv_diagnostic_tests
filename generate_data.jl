@@ -218,6 +218,9 @@ end
 
 @inline get_bin(val,minval,maxval,nbins) = 1+clamp(floor(Int,nbins*(val-minval)/(maxval-minval)),0,nbins-1)
 
+function raw_feature(pts,dim_feature)
+    return Float32.(pts)
+end
 
 """
 histogram feature representation

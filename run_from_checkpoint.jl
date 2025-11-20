@@ -9,23 +9,6 @@ using Flux, JLD2, Random, Statistics
 n_train_per_epoch = 100
 n_test_per_epoch = 50
 
-"""
-Convenience function reconstructing a RNNDiagnostic model from a saved state (NamedTuple)
-"""
-function load_rnn_from_state(input_dim,state)
-    kernel_widths = [size(l.weight,1) for l=state.cnn_encoder.layers[1:2:end]] # skip max pool layers
-    nchannels = [size(l.bias,1) for l=state.cnn_encoder.layers[1:2:end]]
-    rnn_widths = [size(l.cell.Wh,2) for l=state.rnn.layers]
-    mlp_widths = [size(l.bias,1) for l=state.mlp_head.layers]
-
-    pop!(mlp_widths) # constructor expect hidden dimensions
-
-    model = RNNDiagnostic(input_dim=input_dim,cnn_kernel_dims=kernel_widths,cnn_nchannels=nchannels,dims_rnn=rnn_widths,dims_mlp = mlp_widths)
-    Flux.loadmodel!(model,state)
-
-    return model
-end
-
 rng = Random.Xoshiro(2025)
 
 state = JLD2.load("$(prefix).jld2","model_state")
