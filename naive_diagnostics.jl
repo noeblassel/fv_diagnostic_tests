@@ -203,7 +203,7 @@ end
 time_bin_edges = 0.0:0.1:2.0
 bin_centers = (time_bin_edges[1:end-1] .+ time_bin_edges[2:end]) ./ 2
 
-num_chunks = 10
+num_chunks = 1000
 tol_vals_gr = 0.01:0.01:0.1
 
 rng = Random.default_rng()
