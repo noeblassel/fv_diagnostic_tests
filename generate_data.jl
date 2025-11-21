@@ -1,6 +1,16 @@
 const dummy_val = -1.0f0 # dummy variable for masking in sequence batching
 
 """
+Computes the Wassestein-1 distance between two equally-sized samples
+"""
+function w1(X,Y)
+    @assert size(X) == size(Y)
+    Xs = sort(X)
+    Ys = sort(Y)
+    return sum(abs,Xs-Ys)
+end
+
+"""
     generate_potential(; kwargs...)
 
 Generate a random 1D potential `V(x)` on (0,1) together with a diffusion profile `D(x)`.
@@ -188,7 +198,7 @@ function conv_tv(P, ν, ix, tv_tol=0.1; max_iter=1000)
     end
 end
 
-function sim_fv(V′, D, D′, dt, β, Nrep, nsteps ,stride, x0, rng)
+function sim_fv(V′, D, D′, dt, β, Nrep, nsteps ,stride,x0, rng)
     fv_frames = Vector{Float32}[]
     fv = fill(x0, Nrep)
 
@@ -196,6 +206,11 @@ function sim_fv(V′, D, D′, dt, β, Nrep, nsteps ,stride, x0, rng)
     σ = sqrt(2invβ * dt)
 
     fv_trace = Float64[]
+    gr_hist = Float64[]
+    w1_hist = Float64[Inf]
+
+    sum_lin_gr = zeros(Nrep)
+    sum_sq_gr = zeros(Nrep)
 
     for k = 1:nsteps
         fv .+= (-D.(fv) .* V′.(fv) + invβ * D′.(fv)) * dt + σ * sqrt.(D.(fv)) .* randn(rng, Nrep)
@@ -205,15 +220,29 @@ function sim_fv(V′, D, D′, dt, β, Nrep, nsteps ,stride, x0, rng)
         (n_survived == 0) && error("Extinction Event !")
 
         fv[.!(survived)] .= rand(rng, fv[survived], Nrep - sum(survived))
+
         append!(fv_trace, copy(fv))
 
+        sum_lin_gr += fv # for Gelman-Rubin
+        sum_sq_gr += fv .^ 2
+
+
         if k % stride == 0
+            push!(gr_hist,(sum(sum_sq_gr) -sum(sum_lin_gr)^2/(Nrep*k)) / (sum(sum_sq_gr - (sum_lin_gr .^ 2)/k)) - 1)
+
+            if !isempty(fv_frames)
+                push!(w1_hist,w1(last(fv_frames),fv_trace))
+            end
+
             push!(fv_frames, copy(fv_trace))
             empty!(fv_trace)
+
         end
     end
+    
+    w1_hist /= w1_hist[2] # normalize W1-distance by first decrement
 
-    return fv_frames
+    return (fv_frames=fv_frames,gr_history=gr_hist,w1_history=w1_hist)
 end
 
 @inline get_bin(val,minval,maxval,nbins) = 1+clamp(floor(Int,nbins*(val-minval)/(maxval-minval)),0,nbins-1)
@@ -320,13 +349,17 @@ function get_batch(rng;
     ncut=1,
     npot=5,
     min_length=5,
-    max_attempts::Int=10) # <-- new parameter
+    ncorr=2,
+    max_attempts::Int=10,
+    naive = false)
 
     batch = Vector{Vector{Float32}}[]
     labels = Vector{Float32}[]
     βmin,βmax = βlims
 
     i = 0
+
+    naive && (input_dim = 2)
 
     while i < npot
         W, D, W′, D′ = generate_potential(rng=rng)
@@ -340,9 +373,10 @@ function get_batch(rng;
         failed_attempts = 0                # total failed attempts for this potential
         potential_failed = false   # flag to skip to next potential if too many failures
 
+        local fv_frames,gr_hist,w1_hist
+
         for j = 1:ntrace
             success = false
-            fv_frames = Vector{Float32}[]
             decorr_step = -1
 
             while !success
@@ -351,7 +385,11 @@ function get_batch(rng;
                     x0 = (ix + 1) / (Ngrid + 2)
                     decorr_step = max(2,conv_tv(P, ν, ix, tol))
                     
-                    fv_frames = sim_fv(W′, D, D′, dt, β, Nreplicas, 2*decorr_step * stride,stride, x0, rng)
+                    fv_results = sim_fv(W′, D, D′, dt, β, Nreplicas, ncorr*decorr_step * stride,stride, x0, rng)
+
+                    fv_frames = fv_results.fv_frames
+                    gr_hist = fv_results.gr_history
+                    w1_hist = fv_results.w1_history
 
                     if length(fv_frames) >= min_length
                         success = true
@@ -379,8 +417,15 @@ function get_batch(rng;
             features = Vector{Float32}[]
             l = length(fv_frames)
 
-            for f = fv_frames
-                push!(features, feature(f,input_dim))
+            if !naive
+                for f = fv_frames
+                    push!(features, feature(f,input_dim))
+                end
+            else
+                for k=1:size(gr_hist,1)
+                    push!(features,Float32.([gr_hist[k],w1_hist[k]]))
+                end
+
             end
 
             full_labels = (1:l .> decorr_step)
@@ -404,6 +449,11 @@ function get_batch(rng;
                 push!(batch, features[s:e])
                 push!(labels, Float32.(full_labels[s:e]))
 
+            end
+
+            if ncut == 0
+                push!(batch, features)
+                push!(labels, Float32.(full_labels))
             end
         end
 
