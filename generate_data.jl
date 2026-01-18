@@ -7,7 +7,7 @@ function w1(X,Y)
     @assert size(X) == size(Y)
     Xs = sort(X)
     Ys = sort(Y)
-    return sum(abs,Xs-Ys)
+    return sum(abs,Xs-Ys)/length(X)
 end
 
 """
