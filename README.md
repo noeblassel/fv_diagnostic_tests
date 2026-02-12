@@ -6,7 +6,7 @@ Sampling QSDs is a key part of accelerated MD algorithms. The goal is to explore
 
 In this experiment, a Fleming-Viot system of interacting particles, which are killed at the boundary of a domain, and branched uniformly at random from surviving particles, is used to generate approximate samples from the QSD.
 
-A recurrent neural network learns to predict, from a sequence of features of the Fleming-Viot process, whether the underlying non-linear Fokker--Planck equation has converged to its stationary state (which is none other than the QSD). 
+A recurrent neural network learns to predict, from a sequence of features of the Fleming-Viot process, whether the underlying non-linear Fokker-Planck equation has converged to its stationary state (which is none other than the QSD). 
 
 The corresponding quasistationarity diagnostic is trained on low-dimensional systems where ground truth data is available, with the aim of deploying it on low-dimensional traces of Fleming-Viot trajectories from MD simulations, projected to a low-dimensional space through a collective variable $\xi$. Under suitable assumptions on $\xi$, this procedure gives a way to estimate valid decorrelation times.
 
