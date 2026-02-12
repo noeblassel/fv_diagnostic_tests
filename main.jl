@@ -1,3 +1,8 @@
+
+using Pkg
+Pkg.activate(@__DIR__)
+Pkg.instantiate()
+
 include("FVDiagnosticTests.jl")
 
 using .FVDiagnosticTests

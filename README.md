@@ -8,7 +8,7 @@ In this experiment, a Fleming-Viot system of interacting particles, which are ki
 
 A recurrent neural network learns to predict, from a sequence of features of the Fleming-Viot process, whether the underlying non-linear Fokker--Planck equation has converged to its stationary state (which is none other than the QSD). 
 
-The corresponding quasistationarity diagnostic is trained on low-dimensional systems where ground truth data is available, with the aim of deploying it on low-dimensional traces of Fleming-Viot trajectories from MD simulations, projected to a low-dimensional space through a collective variable $\xi$. Under suitable assumptions on this collective variable, this procedure defines another approach to the estimation of decorrelation times.
+The corresponding quasistationarity diagnostic is trained on low-dimensional systems where ground truth data is available, with the aim of deploying it on low-dimensional traces of Fleming-Viot trajectories from MD simulations, projected to a low-dimensional space through a collective variable $\xi$. Under suitable assumptions on $\xi$, this procedure gives a way to estimate valid decorrelation times.
 
 ## Context
 
@@ -64,9 +64,14 @@ Architecture search grid (from `main.jl`):
 - LSTM depth: 1-2, width exponent: 5-6
 - MLP depth: 1-2, width exponent: 5-6
 
-### 2. Online inference
+### 2. Example of online inference
 
 ```julia
+using Pkg
+
+Pkg.activate("/path/to/repo") # activate project environment
+Pkg.instantiate()
+
 using .FVDiagnosticTests
 
 model = load_rnn_from_state(64, model_state)
