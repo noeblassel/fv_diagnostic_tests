@@ -33,8 +33,9 @@ It is therefore of practical importance to explore alternatives to the Gelman-Ru
 | `generate_data.jl` | Defines and samples the synthetic data ensemble, and generates ground-truth labels |
 | `lstm.jl` | Defines the `RNNDiagnostic` model architecture and various convenience functions |
 | `train_lstm.jl` | Defines training-related methods |
-| `tournament.jl` | Jointly train and select model hyperparameters by a tournament-style elimination process |
-| `main.jl` | Training run |
+| `tournament.jl` | Jointly train and select model hyperparameters using a tournament elimination rule |
+| `main.jl` | Tournament training run |
+| `run_from_checkpoint.jl` | Resumes training on a given model architecture |
 
 ### Experiments
 TODO
