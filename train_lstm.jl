@@ -14,6 +14,9 @@
     cut_per_trace::Int
 
     id::String
+
+    stride_lims::Tuple{Int,Int} = (50, 50)
+    Nreplicas_lims::Tuple{Int,Int} = (50, 50)
 end
 
 function test_accuracy!(params::TrainingRun, n)
@@ -29,7 +32,9 @@ function test_accuracy!(params::TrainingRun, n)
         npot=params.pot_per_batch,
         ncut=params.cut_per_trace,
         feature=params.feature,
-        βlims=params.βlims)
+        βlims=params.βlims,
+        stride_lims=params.stride_lims,
+        Nreplicas_lims=params.Nreplicas_lims)
 
         Yhat_logits = params.model(X)
         Yhat_prob = Flux.σ(Yhat_logits)[mask]
@@ -65,7 +70,9 @@ function run_epoch!(params::TrainingRun,n,save_checkpoint=true)
                             npot=params.pot_per_batch,
                             ncut=params.cut_per_trace,
                             feature=params.feature,
-                            βlims=params.βlims)
+                            βlims=params.βlims,
+                            stride_lims=params.stride_lims,
+                            Nreplicas_lims=params.Nreplicas_lims)
 
         loss, grads = Flux.withgradient(params.model) do m
             Yhat_logits = m(X)

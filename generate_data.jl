@@ -292,7 +292,24 @@ function tecdf_feature(pts,dim_feature)
         x = (i - 0.5f0) * dx
         X[i] = Float32(G(x))-x # avoid division by zero
     end
-    return X 
+    return X
+end
+
+"""
+Deep Sets feature representation — returns sorted particle positions resampled to exactly Nmax.
+
+If the ensemble has more than Nmax particles, subsample without replacement.
+If fewer, resample with replacement (bootstrap).
+"""
+function deep_set_feature(pts, Nmax; rng=Random.default_rng())
+    N = length(pts)
+    if N == Nmax
+        return sort(Float32.(pts))
+    elseif N > Nmax
+        return sort(Float32.(sample(rng, pts, Nmax; replace=false)))
+    else
+        return sort(Float32.(sample(rng, pts, Nmax; replace=true)))
+    end
 end
 
 """
@@ -341,8 +358,8 @@ function get_batch(rng;
     Ngrid=500,
     βlims=(1.0,1.0),
     dt=1e-3,
-    stride=50,
-    Nreplicas=50,
+    stride_lims::Tuple{Int,Int}=(50,50),
+    Nreplicas_lims::Tuple{Int,Int}=(50,50),
     input_dim=64,
     feature::Function=hist_feature,
     ntrace=5,
@@ -368,6 +385,9 @@ function get_batch(rng;
 
         L = comp_generator(W, D, β, Ngrid) # killed generator, Ngrid×Ngrid
         ν, gap = comp_qsd(W, β, L)
+
+        # Sample stride for this potential (controls lag time τ = stride*dt)
+        stride = rand(rng, stride_lims[1]:stride_lims[2])
         P = exp(-(stride * dt) * Matrix(L)) # killed semigroup -- minus sign because comp_generator returns the negative generator
 
         failed_attempts = 0                # total failed attempts for this potential
@@ -376,6 +396,9 @@ function get_batch(rng;
         local fv_frames,gr_hist,w1_hist
 
         for j = 1:ntrace
+            # Sample number of replicas for this trace
+            Nreplicas = rand(rng, Nreplicas_lims[1]:Nreplicas_lims[2])
+
             success = false
             decorr_step = -1
 
@@ -384,7 +407,7 @@ function get_batch(rng;
                     ix = rand(rng, 1:Ngrid)
                     x0 = (ix + 1) / (Ngrid + 2)
                     decorr_step = max(2,conv_tv(P, ν, ix, tol))
-                    
+
                     fv_results = sim_fv(W′, D, D′, dt, β, Nreplicas, ncorr*decorr_step * stride,stride, x0, rng)
 
                     fv_frames = fv_results.fv_frames

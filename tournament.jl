@@ -5,14 +5,14 @@ function build_candidate_run(hyp;
         pot_per_batch = 5,
         trace_per_pot = 5,
         cut_per_trace = 2,
-        feature = hist_feature)
+        feature = hist_feature,
+        stride_lims = (50, 50),
+        Nreplicas_lims = (50, 50))
 
-    lr, cd, cw, rd, rw, md, mw = hyp
+    lr, h = hyp   # h is a RNNDiagnosticHyperParams
 
     seed = base_seed + hash(hyp)
     rng = Xoshiro(seed)
-
-    h = RNNDiagnosticHyperParams(cd, cw, rd, rw, md, mw)
 
     model = RNNDiagnostic(h; input_dim=input_dim, rng=rng)
 
@@ -31,7 +31,9 @@ function build_candidate_run(hyp;
         pot_per_batch=pot_per_batch,
         trace_per_pot=trace_per_pot,
         cut_per_trace=cut_per_trace,
-        id="$(tstamp)_$(hash(hyp))_$(base_seed)"
+        id="$(tstamp)_$(hash(hyp))_$(base_seed)",
+        stride_lims=stride_lims,
+        Nreplicas_lims=Nreplicas_lims
     )
 end
 
