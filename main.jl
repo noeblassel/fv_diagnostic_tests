@@ -17,7 +17,7 @@ mlp_depth_range = 1:2
 mlp_width_exponent_range = 5:6
 
 
-candidates = [build_candidate_run((lr, cd, cw, rd, rw, md, mw);base_seed = 2022)
+candidates = [build_candidate_run((lr, RNNDiagnosticHyperParams(cd, cw, rd, rw, md, mw)); base_seed=2022)
  for lr in lrs for cd in cnn_depth_range for cw in cnn_width_exponent_range
                for rd in rnn_depth_range for rw in rnn_width_exponent_range for md in mlp_depth_range
                for mw in mlp_width_exponent_range]
