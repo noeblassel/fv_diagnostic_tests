@@ -4,7 +4,7 @@ Pkg.instantiate()
 
 include(joinpath(@__DIR__, "..", "FVDiagnosticTests.jl"))
 using .FVDiagnosticTests
-using JLD2, Random, Statistics
+using JLD2, Random, Statistics, ProgressMeter
 
 """
     generate_offline_dataset(rng; kwargs...)
@@ -32,7 +32,7 @@ function generate_offline_dataset(rng;
         stride_lims  :: Tuple{Int,Int} = (10, 200),
         Nreplicas_lims :: Tuple{Int,Int} = (10, 200),
         ntrace       = 5,
-        npot         = 100,
+        npot         = 200,
         min_length   = 5,
         ncorr        = 2,
         max_attempts = 10)
@@ -45,6 +45,8 @@ function generate_offline_dataset(rng;
 
     βmin, βmax = βlims
     i = 0
+
+    prog_bar = Progress(npot)
 
     while i < npot
         W, D, W′, D′ = generate_potential(rng=rng)
@@ -141,7 +143,7 @@ function generate_offline_dataset(rng;
         end
 
         i += 1
-        println("Generated $i/$npot potentials")
+        next!(prog_bar)
     end
 
     return (sequences  = sequences,
@@ -154,8 +156,8 @@ end
 
 # ── Generate and save ─────────────────────────────────────────────────────────
 
-dataset = generate_offline_dataset(Xoshiro(2024);
-    npot           = 100,
+dataset = generate_offline_dataset(Xoshiro(2026);
+    npot           = 200,
     ntrace         = 5,
     βlims          = (1.0, 3.0),
     stride_lims    = (10, 200),
@@ -174,7 +176,7 @@ println("T_conv range           : $(round(minimum(dataset.T_convs); digits=2)) �
 
 # ── 80/20 train/test split by trajectory index ────────────────────────────────
 
-perm    = randperm(Xoshiro(2025), n_traj)
+perm    = randperm(Xoshiro(2026), n_traj)
 n_train = round(Int, 0.8 * n_traj)
 train_idx = perm[1:n_train]
 test_idx  = perm[n_train+1:end]

@@ -344,13 +344,13 @@ function freeze_thaw_bo_search(build_run, lb, ub;
             println("  [FTBO] iter $iter/$n_iter  THAW config $chosen_pool_idx" *
                     " (chunk $t_next/$T_final)" *
                     "  loss=$(round(loss; digits=4))" *
-                    "  best=$(round(best_observed(); digits=4))")
+                    "  best=$(round(best_observed(); digits=4))" *
+                     "  model: $(repr("text/plain",cfg.run.model))")
         else
             loss = launch_config!(chosen_x_new)
             println("  [FTBO] iter $iter/$n_iter  NEW config #$(length(pool))" *
                     "  loss=$(round(loss; digits=4))" *
-                    "  best=$(round(best_observed(); digits=4))" *
-                    "  model: $(repr("text/plain",cfg.run.model))")
+                    "  best=$(round(best_observed(); digits=4))")
         end
         flush(stdout)
     end
@@ -366,11 +366,11 @@ end
 # Shared settings (match tune_bo.jl where applicable)
 # ============================================================
 
-const BASE_SEED      = 2022
+const BASE_SEED      = 2026
 const INPUT_DIM_CNN  = 64
 const INPUT_DIM_DS   = 200
 const BETA_LIMS      = (1.0, 3.0)
-const T_FINAL        = 6      # max training epochs per config (GP extrapolation horizon)
+const T_FINAL        = 20      # max training epochs per config (GP extrapolation horizon)
 const POT_PER_BATCH  = 5
 const TRACE_PER_POT  = 5
 const CUT_PER_TRACE  = 2
@@ -473,7 +473,7 @@ result_cnn = freeze_thaw_bo_search(
     make_build_run_cnn(),
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5],
     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5];
-    n_init  = 5,
+    n_init  = 1,
     n_iter  = 45,
     T_final = T_FINAL,
     rng     = Xoshiro(BASE_SEED))
@@ -490,7 +490,7 @@ result_ds = freeze_thaw_bo_search(
     make_build_run_ds(),
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 0.5, 2.5, 0.5, 2.5],
     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 3.5, 6.5, 3.5, 6.5];
-    n_init  = 5,
+    n_init  = 1,
     n_iter  = 55,
     T_final = T_FINAL,
     rng     = Xoshiro(BASE_SEED + 1))
