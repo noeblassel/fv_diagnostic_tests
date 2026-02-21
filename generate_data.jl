@@ -198,51 +198,62 @@ function conv_tv(P, ν, ix, tv_tol=0.1; max_iter=1000)
     end
 end
 
-function sim_fv(V′, D, D′, dt, β, Nrep, nsteps ,stride,x0, rng)
+function sim_fv(V′, D, D′, dt, β, Nrep, nsteps, stride, x0, rng; naive::Bool=false)
     fv_frames = Vector{Float32}[]
     fv = fill(x0, Nrep)
 
     invβ = inv(β)
     σ = sqrt(2invβ * dt)
 
-    fv_trace = Float64[]
-    gr_hist = Float64[]
-    w1_hist = Float64[Inf]
+    # opt 4: pre-allocate buffers — avoids stride*nframes small heap allocations
+    fv_trace_buf = Vector{Float64}(undef, Nrep * stride)
+    survived_buf = Vector{Bool}(undef, Nrep)
+    Dv           = Vector{Float64}(undef, Nrep)
+
+    gr_hist  = Float64[]
+    w1_hist  = Float64[Inf]
 
     sum_lin_gr = zeros(Nrep)
-    sum_sq_gr = zeros(Nrep)
+    sum_sq_gr  = zeros(Nrep)
 
     for k = 1:nsteps
-        fv .+= (-D.(fv) .* V′.(fv) + invβ * D′.(fv)) * dt + σ * sqrt.(D.(fv)) .* randn(rng, Nrep)
-        survived = (0 .< fv .< 1)
-        n_survived = sum(survived)
+        @. Dv = D(fv)                                                          # opt 2: cache D(fv), avoids double evaluation
+        fv .+= (-Dv .* V′.(fv) + invβ * D′.(fv)) * dt + σ * sqrt.(Dv) .* randn(rng, Nrep)
+
+        @. survived_buf = (0 < fv < 1)                                         # opt 4: reuse pre-allocated Bool buffer
+        n_survived = count(survived_buf)
 
         (n_survived == 0) && error("Extinction Event !")
 
-        fv[.!(survived)] .= rand(rng, fv[survived], Nrep - sum(survived))
+        fv[.!(survived_buf)] .= rand(rng, fv[survived_buf], Nrep - n_survived)
 
-        append!(fv_trace, copy(fv))
+        # opt 4: write into pre-allocated window buffer instead of append!
+        step_in_window = mod1(k, stride)
+        fv_trace_buf[(step_in_window - 1)*Nrep + 1 : step_in_window*Nrep] .= fv
 
-        sum_lin_gr += fv # for Gelman-Rubin
-        sum_sq_gr += fv .^ 2
-
+        if naive                                                                # opt 3: skip GR/W1 accumulation when not needed
+            sum_lin_gr += fv
+            sum_sq_gr  += fv .^ 2
+        end
 
         if k % stride == 0
-            push!(gr_hist,(sum(sum_sq_gr) -sum(sum_lin_gr)^2/(Nrep*k)) / (sum(sum_sq_gr - (sum_lin_gr .^ 2)/k)) - 1)
+            if naive
+                push!(gr_hist, (sum(sum_sq_gr) - sum(sum_lin_gr)^2/(Nrep*k)) / (sum(sum_sq_gr - (sum_lin_gr .^ 2)/k)) - 1)
 
-            if !isempty(fv_frames)
-                push!(w1_hist,w1(last(fv_frames),fv_trace))
+                if !isempty(fv_frames)
+                    push!(w1_hist, w1(last(fv_frames), fv_trace_buf))
+                end
             end
 
-            push!(fv_frames, copy(fv_trace))
-            empty!(fv_trace)
-
+            push!(fv_frames, copy(fv_trace_buf))                               # opt 4: one allocation per frame instead of stride allocations
         end
     end
-    
-    w1_hist /= w1_hist[2] # normalize W1-distance by first decrement
 
-    return (fv_frames=fv_frames,gr_history=gr_hist,w1_history=w1_hist)
+    if naive
+        w1_hist /= w1_hist[2]                                                  # normalize W1-distance by first decrement
+    end
+
+    return (fv_frames=fv_frames, gr_history=gr_hist, w1_history=w1_hist)
 end
 
 @inline get_bin(val,minval,maxval,nbins) = 1+clamp(floor(Int,nbins*(val-minval)/(maxval-minval)),0,nbins-1)
@@ -392,90 +403,118 @@ function get_batch(rng;
 
         P_gt = exp(-tau_gt * Matrix(L)) # killed semigroup at lag time tau_gt -- minus sign because comp_generator returns the negative generator
 
-        failed_attempts = 0                # total failed attempts for this potential
         potential_failed = false   # flag to skip to next potential if too many failures
 
-        local fv_frames,gr_hist,w1_hist
+        # opt 1: pre-sample all per-trace random values from master RNG before parallelizing
+        trace_seeds     = rand(rng, UInt64, ntrace)
+        trace_strides   = rand(rng, stride_lims[1]:stride_lims[2], ntrace)
+        trace_Nreplicas = rand(rng, Nreplicas_lims[1]:Nreplicas_lims[2], ntrace)
+        trace_ixs       = rand(rng, 1:Ngrid, ntrace)
 
-        for j = 1:ntrace
-            # Sample stride and number of replicas for this trace
-            stride = rand(rng, stride_lims[1]:stride_lims[2])
-            Nreplicas = rand(rng, Nreplicas_lims[1]:Nreplicas_lims[2])
+        trace_results = Vector{Any}(undef, ntrace)
 
-            success = false
+        # opt 1: ntrace FV simulations for this potential are embarrassingly parallel
+        Threads.@threads for j = 1:ntrace
+            local_rng   = Random.Xoshiro(trace_seeds[j])
+            stride_j    = trace_strides[j]
+            Nreplicas_j = trace_Nreplicas[j]
+            ix_j        = trace_ixs[j]
+
+            local_failed   = 0
+            success        = false
             decorr_step_gt = -1
-            T_conv = 0.0
+            T_conv         = 0.0
+            local_fv       = nothing
 
             while !success
                 try
-                    ix = rand(rng, 1:Ngrid)
-                    x0 = (ix + 1) / (Ngrid + 2)
-                    decorr_step_gt = max(2, conv_tv(P_gt, ν, ix, tol))
-                    T_conv = decorr_step_gt * tau_gt                          # physical convergence time
-                    nframes_target = max(min_length, round(Int, ncorr * T_conv / (stride * dt)))
-                    nsteps_total   = nframes_target * stride
-                    fv_results = sim_fv(W′, D, D′, dt, β, Nreplicas, nsteps_total, stride, x0, rng)
+                    x0             = (ix_j + 1) / (Ngrid + 2)
+                    decorr_step_gt = max(2, conv_tv(P_gt, ν, ix_j, tol))
+                    T_conv         = decorr_step_gt * tau_gt
+                    nframes_target = max(min_length, round(Int, ncorr * T_conv / (stride_j * dt)))
+                    nsteps_total   = nframes_target * stride_j
+                    local_fv       = sim_fv(W′, D, D′, dt, β, Nreplicas_j, nsteps_total, stride_j, x0, local_rng; naive=naive)
 
-                    fv_frames = fv_results.fv_frames
-                    gr_hist = fv_results.gr_history
-                    w1_hist = fv_results.w1_history
-
-                    if length(fv_frames) >= min_length
+                    if length(local_fv.fv_frames) >= min_length
                         success = true
                     else
-                        failed_attempts += 1
+                        local_failed += 1
                     end
 
                 catch e
-                    failed_attempts += 1
-                    @warn "Fleming-Viot run failed..." exception=(e,catch_backtrace())
+                    local_failed += 1
+                    @warn "Fleming-Viot run failed..." exception=(e, catch_backtrace())
                 end
 
-                if failed_attempts >= max_attempts
-                    @info "Exceeded maximum attempts ($max_attempts) for this potential — skipping to next potential"
-                    potential_failed = true
+                if local_failed >= max_attempts
+                    @info "Exceeded maximum attempts ($max_attempts) for trace $j — skipping"
                     break
                 end
+
+                ix_j = rand(local_rng, 1:Ngrid)
             end
 
-            if potential_failed
-                break
-            end
+            trace_results[j] = success ? (
+                fv_frames      = local_fv.fv_frames,
+                gr_history     = local_fv.gr_history,
+                w1_history     = local_fv.w1_history,
+                Nreplicas      = Nreplicas_j,
+                stride         = stride_j,
+                decorr_step_gt = decorr_step_gt,
+                T_conv         = T_conv,
+                success        = true,
+            ) : (success = false,)
+        end
 
-            # process successful trace
-            features = Vector{Float32}[]
-            l = length(fv_frames)
+        # Skip potential if any trace failed to produce valid data
+        potential_failed = any(r -> !r.success, trace_results)
 
-            if !naive
-                for f = fv_frames
-                    push!(features, feature(f,input_dim))
+        if !potential_failed
+            # Collate successful trace results serially
+            for j = 1:ntrace
+                r = trace_results[j]
+                !r.success && continue
+
+                fv_frames = r.fv_frames
+                gr_hist   = r.gr_history
+                w1_hist   = r.w1_history
+                Nreplicas = r.Nreplicas
+                stride    = r.stride
+                T_conv    = r.T_conv
+                l         = length(fv_frames)
+
+                features = Vector{Float32}[]
+
+                if !naive
+                    for f = fv_frames
+                        push!(features, feature(f, input_dim))
+                    end
+                else
+                    for k = 1:size(gr_hist, 1)
+                        push!(features, Float32.([gr_hist[k], w1_hist[k]]))
+                    end
                 end
-            else
-                for k=1:size(gr_hist,1)
-                    push!(features,Float32.([gr_hist[k],w1_hist[k]]))
+
+                # Append sqrt(N·τ) calibration scalar to every frame
+                meta_val = Float32(sqrt(Nreplicas * stride * dt))
+                features = [vcat(f, [meta_val]) for f in features]
+
+                full_labels = (1:l) .* (stride * dt) .> T_conv
+
+                for k = 1:ncut
+                    # Start-anchored, uniformly-sampled length: keeps positive-label
+                    # fraction distribution constant across batches
+                    α_min = min_length / l
+                    α     = α_min + rand(rng) * (1.0 - α_min)
+                    len   = clamp(round(Int, α * l), min_length, l)
+                    push!(batch, features[1:len])
+                    push!(labels, Float32.(full_labels[1:len]))
                 end
 
-            end
-
-            # Append sqrt(N·τ) calibration scalar to every frame
-            meta_val = Float32(sqrt(Nreplicas * stride * dt))
-            features = [vcat(f, [meta_val]) for f in features]
-
-            full_labels = (1:l) .* (stride * dt) .> T_conv
-
-            for k=1:ncut
-                # Start-anchored, uniformly-sampled length: keeps positive-label
-                # fraction distribution constant across batches
-                α_min = min_length / l
-                α = α_min + rand(rng) * (1.0 - α_min)
-                len = clamp(round(Int, α * l), min_length, l)
-                push!(batch, features[1:len])
-                push!(labels, Float32.(full_labels[1:len]))
-            end
-
-            if ncut == 0
-                push!(batch, features)
-                push!(labels, Float32.(full_labels))
+                if ncut == 0
+                    push!(batch, features)
+                    push!(labels, Float32.(full_labels))
+                end
             end
         end
 
