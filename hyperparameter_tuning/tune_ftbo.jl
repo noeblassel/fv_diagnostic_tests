@@ -477,7 +477,7 @@ result_cnn = freeze_thaw_bo_search(
     make_build_run_cnn(),
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5],
     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5];
-    n_init  = 1,
+    n_init  = 10,
     n_iter  = 200,
     T_final = T_FINAL,
     rng     = Xoshiro(BASE_SEED),
@@ -495,7 +495,7 @@ result_ds = freeze_thaw_bo_search(
     make_build_run_ds(),
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 0.5, 4.5, 0.5, 4.5],
     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 3.5, 8.5, 3.5, 8.5];
-    n_init  = 1,
+    n_init  = 10,
     n_iter  = 200,
     T_final = T_FINAL,
     rng     = Xoshiro(BASE_SEED + 1),
