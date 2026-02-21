@@ -7,14 +7,15 @@ function build_candidate_run(hyp;
         cut_per_trace = 2,
         feature = hist_feature,
         stride_lims = (50, 50),
-        Nreplicas_lims = (50, 50))
+        Nreplicas_lims = (50, 50),
+        n_meta::Int = 1)
 
     lr, h = hyp   # h is a RNNDiagnosticHyperParams
 
     seed = base_seed + hash(hyp)
     rng = Xoshiro(seed)
 
-    model = RNNDiagnostic(h; input_dim=input_dim, rng=rng)
+    model = RNNDiagnostic(h; input_dim=input_dim, n_meta=n_meta, rng=rng)
 
     opt = Adam(lr)
     opt_state = Flux.setup(opt, model)
