@@ -86,7 +86,7 @@ function (f::DeepSetFeaturizer)(x)
     phi_out = f.phi(x_flat)                                    # (d, Nmax * n_samples)
     d = size(phi_out, 1)
     phi_out = reshape(phi_out, d, Nmax, n_samples)
-    aggregated = dropdims(sum(phi_out; dims=2); dims=2)        # (d, n_samples)
+    aggregated = dropdims(mean(phi_out; dims=2); dims=2)        # (d, n_samples)
     return f.rho(aggregated)                                    # (output_dim, n_samples)
 end
 
@@ -98,6 +98,7 @@ struct RNNDiagnostic{F<:AbstractFeaturizer, T<:Chain, U<:Chain}
     featurizer::F
     rnn::T
     mlp_head::U
+    n_meta::Int      # number of metadata scalars appended to each frame (bypass featurizer)
 end
 
 Flux.@layer RNNDiagnostic
@@ -105,12 +106,13 @@ Flux.@layer RNNDiagnostic
 function RNNDiagnostic(featurizer::AbstractFeaturizer;
     dims_rnn::Vector{Int}=[64],
     dims_mlp::Vector{Int}=[64, 32],
+    n_meta::Int=0,
     rng=Random.GLOBAL_RNG)
 
     initializer = Flux.glorot_uniform(rng)
 
     rnn_layers = []
-    input_dim_rnn = featurizer.output_dim
+    input_dim_rnn = featurizer.output_dim + n_meta   # LSTM sees featurizer output + metadata
     for output_dim_rnn in dims_rnn
         push!(rnn_layers, LSTM(input_dim_rnn => output_dim_rnn, init_kernel=initializer, init_recurrent_kernel=initializer))
         input_dim_rnn = output_dim_rnn
@@ -125,7 +127,7 @@ function RNNDiagnostic(featurizer::AbstractFeaturizer;
     end
     mlp = Chain(mlp_layers..., Dense(last(dims_mlp) => 1, init=initializer))
 
-    return RNNDiagnostic(featurizer, rnn, mlp)
+    return RNNDiagnostic(featurizer, rnn, mlp, n_meta)
 end
 
 # Backward-compatible constructor using a CNN featurizer
@@ -134,20 +136,29 @@ function RNNDiagnostic(; input_dim::Int=64,
     cnn_nchannels::Vector{Int}=[16,32,64],
     dims_rnn::Vector{Int}=[64],
     dims_mlp::Vector{Int}=[64, 32],
+    n_meta::Int=0,
     rng=Random.GLOBAL_RNG)
 
     featurizer = CNNFeaturizer(; input_dim=input_dim, kernel_dims=cnn_kernel_dims, nchannels=cnn_nchannels, rng=rng)
-    return RNNDiagnostic(featurizer; dims_rnn=dims_rnn, dims_mlp=dims_mlp, rng=rng)
+    return RNNDiagnostic(featurizer; dims_rnn=dims_rnn, dims_mlp=dims_mlp, n_meta=n_meta, rng=rng)
 end
 
 function (m::RNNDiagnostic)(x)
     @assert ndims(x) == 3 "Input size error: expected data in format (input_dim,sequence_length,batch_size)"
 
-    input_dim, seq_len, batch_size = size(x)
-    x_flat = reshape(x, input_dim, 1, seq_len * batch_size)
+    total_dim, seq_len, batch_size = size(x)
+    feature_dim = total_dim - m.n_meta
 
+    x_feat = x[1:feature_dim, :, :]
+    x_meta = x[(feature_dim+1):end, :, :]              # (n_meta, seq_len, batch_size)
+
+    x_flat = reshape(x_feat, feature_dim, 1, seq_len * batch_size)
     z = m.featurizer(x_flat)                           # (feat_dim, seq_len*batch)
     z = reshape(z, size(z, 1), seq_len, batch_size)
+
+    if m.n_meta > 0
+        z = vcat(z, x_meta)                            # (feat_dim + n_meta, seq_len, batch_size)
+    end
 
     h = m.rnn(z)
 
@@ -201,11 +212,11 @@ function build_featurizer(hp::DeepSetFeaturizerHyperParams; input_dim::Int, rng=
     return DeepSetFeaturizer(; dims_phi=dims_phi, dims_rho=dims_rho, rng=rng)
 end
 
-function RNNDiagnostic(hp::RNNDiagnosticHyperParams; input_dim::Int=64, rng=Random.GLOBAL_RNG)
+function RNNDiagnostic(hp::RNNDiagnosticHyperParams; input_dim::Int=64, n_meta::Int=1, rng=Random.GLOBAL_RNG)
     featurizer = build_featurizer(hp.featurizer; input_dim=input_dim, rng=rng)
     dims_rnn = fill(2^hp.rnn_width_exponent, hp.rnn_depth)
     dims_mlp = fill(2^hp.mlp_width_exponent, hp.mlp_depth)
-    return RNNDiagnostic(featurizer; dims_rnn=dims_rnn, dims_mlp=dims_mlp, rng=rng)
+    return RNNDiagnostic(featurizer; dims_rnn=dims_rnn, dims_mlp=dims_mlp, n_meta=n_meta, rng=rng)
 end
 
 # ========================
@@ -217,13 +228,14 @@ mutable struct RNNDiagnosticOnline{F<:AbstractFeaturizer, T<:AbstractVector, U<:
     rnn_cells::T
     mlp_head::U
     rnn_state::V
+    n_meta::Int
 end
 
 function RNNDiagnosticOnline(model::T) where {T}
     rnn_cells = [layer.cell for layer in model.rnn.layers]
     dims_rnn = [size(cell.bias, 1) ÷ 4 for cell in rnn_cells]
     rnn_state = [(zeros(Float32, d), zeros(Float32, d)) for d in dims_rnn]
-    return RNNDiagnosticOnline(model.featurizer, rnn_cells, model.mlp_head, rnn_state)
+    return RNNDiagnosticOnline(model.featurizer, rnn_cells, model.mlp_head, rnn_state, model.n_meta)
 end
 
 function reset_rnn_state!(model::RNNDiagnosticOnline)
@@ -232,12 +244,14 @@ end
 
 function (m::RNNDiagnosticOnline)(x)
     @assert ndims(x) == 1 "RNNDiagnosticOnline only accepts 1D input vectors"
-    input_dim = size(x, 1)
+    feature_dim = length(x) - m.n_meta
 
-    x = reshape(x, input_dim, 1, 1)  # featurizer expects (input_dim, 1, n_samples)
+    x_feat = reshape(x[1:feature_dim], feature_dim, 1, 1)  # featurizer expects (input_dim, 1, n_samples)
+    z = vec(m.featurizer(x_feat))
 
-    z = m.featurizer(x)
-    z = reshape(z, prod(size(z)))    # flatten to 1D vector
+    if m.n_meta > 0
+        z = vcat(z, x[(feature_dim+1):end])                # append metadata before first LSTM cell
+    end
 
     for (i, cell) in enumerate(m.rnn_cells)
         (z, m.rnn_state[i]) = cell(z, m.rnn_state[i])
@@ -278,8 +292,13 @@ function load_rnn_from_state(input_dim, state)
         mlp_widths = [size(l.bias, 1) for l in state.mlp_head.layers]
         pop!(mlp_widths)
 
-        model = RNNDiagnostic(featurizer; dims_rnn=rnn_widths, dims_mlp=mlp_widths)
-        Flux.loadmodel!(model, state)
+        lstm_input_size = size(state.rnn.layers[1].cell.Wi, 2)
+        n_meta = lstm_input_size - featurizer.output_dim
+
+        model = RNNDiagnostic(featurizer; dims_rnn=rnn_widths, dims_mlp=mlp_widths, n_meta=n_meta)
+        Flux.loadmodel!(model.featurizer, state.featurizer)
+        Flux.loadmodel!(model.rnn, state.rnn)
+        Flux.loadmodel!(model.mlp_head, state.mlp_head)
     else
         # Old format: cnn_encoder field (backward compatibility)
         kernel_widths = [size(l.weight, 1) for l in state.cnn_encoder.layers[1:2:end]]
