@@ -296,7 +296,7 @@ function tecdf_feature(pts,dim_feature)
 end
 
 """
-Deep Sets feature representation — returns sorted particle positions resampled to exactly Nmax.
+Deep Sets feature representation — returns particle positions resampled to exactly Nmax.
 
 If the ensemble has more than Nmax particles, subsample without replacement.
 If fewer, resample with replacement (bootstrap).
@@ -304,11 +304,11 @@ If fewer, resample with replacement (bootstrap).
 function deep_set_feature(pts, Nmax; rng=Random.default_rng())
     N = length(pts)
     if N == Nmax
-        return sort(Float32.(pts))
+        return Float32.(pts)
     elseif N > Nmax
-        return sort(Float32.(sample(rng, pts, Nmax; replace=false)))
+        return Float32.(sample(rng, pts, Nmax; replace=false))
     else
-        return sort(Float32.(sample(rng, pts, Nmax; replace=true)))
+        return Float32.(sample(rng, pts, Nmax; replace=true))
     end
 end
 
@@ -325,11 +325,14 @@ into a batch suitable for machine learning or statistical modeling.
 - `rng::AbstractRNG`: a pseudorandom number generator.
 # Keyword Arguments
 - `tol::Float64=0.05`: tolerance for convergence in total variation distance.
-- `Ngrid::Int=500`: number of grid points for the discretized generator.
+- `Ngrid::Int=100`: number of grid points for the discretized generator.
 - `βlims=(1.0,1.0)`: range of possible inverse temperatures β to sample from.
 - `dt::Float64=1e-3`: time step for Fleming–Viot simulation.
-- `lagtime=50dt`: lag time for killed semigroup propagation.
-- `Nreplicas::Int=50`: number of replicas used in the Fleming–Viot ensemble.
+- `tau_gt::Float64=0.1`: fixed lag time for the ground-truth killed semigroup `P_gt = exp(-tau_gt * L)`;
+  computed once per potential, decoupled from simulation stride.
+- `stride_lims::Tuple{Int,Int}=(50,50)`: range of simulation sampling strides per trace;
+  controls ONLY sampling frequency, not ground-truth accuracy.
+- `Nreplicas_lims::Tuple{Int,Int}=(50,50)`: range of replica counts to sample per trace.
 - `input_dim::Int=64`: dimensionality of feature vectors (e.g., histogram bins).
 - `feature::Function=hist_feature`: feature extraction function; one of
   `hist_feature`, `ecdf_feature`, or `tecdf_feature`.
@@ -342,7 +345,7 @@ into a batch suitable for machine learning or statistical modeling.
 
 # Returns
 A tuple `(X, Y, mask)` where:
-- `X` is a 3D tensor `(input_dim, max_length, batch_size)` of feature sequences.
+- `X` is a 3D tensor `(input_dim + 1, max_length, batch_size)` of feature sequences (the +1 is a `sqrt(N·τ)` metadata scalar).
 - `Y` is a 2D tensor `(max_length, batch_size)` of binary labels indicating decorrelation.
 - `mask` is a boolean matrix of the same shape as `Y`, where `true` marks valid entries.
 
@@ -355,9 +358,10 @@ A tuple `(X, Y, mask)` where:
 
 function get_batch(rng;
     tol=0.05,
-    Ngrid=500,
+    Ngrid=100,
     βlims=(1.0,1.0),
     dt=1e-3,
+    tau_gt::Float64=0.1,
     stride_lims::Tuple{Int,Int}=(50,50),
     Nreplicas_lims::Tuple{Int,Int}=(50,50),
     input_dim=64,
@@ -386,9 +390,7 @@ function get_batch(rng;
         L = comp_generator(W, D, β, Ngrid) # killed generator, Ngrid×Ngrid
         ν, gap = comp_qsd(W, β, L)
 
-        # Sample stride for this potential (controls lag time τ = stride*dt)
-        stride = rand(rng, stride_lims[1]:stride_lims[2])
-        P = exp(-(stride * dt) * Matrix(L)) # killed semigroup -- minus sign because comp_generator returns the negative generator
+        P_gt = exp(-tau_gt * Matrix(L)) # killed semigroup at lag time tau_gt -- minus sign because comp_generator returns the negative generator
 
         failed_attempts = 0                # total failed attempts for this potential
         potential_failed = false   # flag to skip to next potential if too many failures
@@ -396,19 +398,23 @@ function get_batch(rng;
         local fv_frames,gr_hist,w1_hist
 
         for j = 1:ntrace
-            # Sample number of replicas for this trace
+            # Sample stride and number of replicas for this trace
+            stride = rand(rng, stride_lims[1]:stride_lims[2])
             Nreplicas = rand(rng, Nreplicas_lims[1]:Nreplicas_lims[2])
 
             success = false
-            decorr_step = -1
+            decorr_step_gt = -1
+            T_conv = 0.0
 
             while !success
                 try
                     ix = rand(rng, 1:Ngrid)
                     x0 = (ix + 1) / (Ngrid + 2)
-                    decorr_step = max(2,conv_tv(P, ν, ix, tol))
-
-                    fv_results = sim_fv(W′, D, D′, dt, β, Nreplicas, ncorr*decorr_step * stride,stride, x0, rng)
+                    decorr_step_gt = max(2, conv_tv(P_gt, ν, ix, tol))
+                    T_conv = decorr_step_gt * tau_gt                          # physical convergence time
+                    nframes_target = max(min_length, round(Int, ncorr * T_conv / (stride * dt)))
+                    nsteps_total   = nframes_target * stride
+                    fv_results = sim_fv(W′, D, D′, dt, β, Nreplicas, nsteps_total, stride, x0, rng)
 
                     fv_frames = fv_results.fv_frames
                     gr_hist = fv_results.gr_history
@@ -451,27 +457,20 @@ function get_batch(rng;
 
             end
 
-            full_labels = (1:l .> decorr_step)
+            # Append sqrt(N·τ) calibration scalar to every frame
+            meta_val = Float32(sqrt(Nreplicas * stride * dt))
+            features = [vcat(f, [meta_val]) for f in features]
 
-            valid_lengths = min_length:l
-            weights = Weights(valid_lengths) # favor longer sequences
+            full_labels = (1:l) .* (stride * dt) .> T_conv
 
             for k=1:ncut
-                len = sample(rng,valid_lengths,weights)
-
-                local s,e
-
-                if rand(rng) < 0.5
-                    s = 1
-                    e = len
-                else
-                    s = l - len + 1
-                    e = l
-                end
-
-                push!(batch, features[s:e])
-                push!(labels, Float32.(full_labels[s:e]))
-
+                # Start-anchored, uniformly-sampled length: keeps positive-label
+                # fraction distribution constant across batches
+                α_min = min_length / l
+                α = α_min + rand(rng) * (1.0 - α_min)
+                len = clamp(round(Int, α * l), min_length, l)
+                push!(batch, features[1:len])
+                push!(labels, Float32.(full_labels[1:len]))
             end
 
             if ncut == 0
@@ -493,7 +492,7 @@ function get_batch(rng;
     end
     p = randperm(rng, nsamples)
 
-    batch_X = batchseq(view(batch, p), zeros(Float32, input_dim))
+    batch_X = batchseq(view(batch, p), zeros(Float32, input_dim + 1))
     batch_Y = batchseq(view(labels, p), dummy_val)
 
     Y = stack(batch_Y,dims=1)
