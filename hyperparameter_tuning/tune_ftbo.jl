@@ -229,7 +229,8 @@ function freeze_thaw_bo_search(build_run, lb, ub;
         β_t           = 1.0,
         noise         = 1.0,
         hp_fit_every  = 3,
-        rng           = Xoshiro(42))
+        rng           = Xoshiro(42),
+        prefix="")
 
     d = length(lb)
 
@@ -356,6 +357,9 @@ function freeze_thaw_bo_search(build_run, lb, ub;
     end
 
     best_cfg = argmin(cfg -> minimum(cfg.losses), pool)
+    JLD2.jldsave(joinpath(@__DIR__, "best_ftbo_$prefix.jld2"), model_state = Flux.state(best_cfg.model)) # checkpoint best performer
+
+
     return (pool        = pool,
             best_config = best_cfg,
             best_x      = best_cfg.x,
@@ -474,9 +478,10 @@ result_cnn = freeze_thaw_bo_search(
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5],
     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5];
     n_init  = 1,
-    n_iter  = 45,
+    n_iter  = 200,
     T_final = T_FINAL,
-    rng     = Xoshiro(BASE_SEED))
+    rng     = Xoshiro(BASE_SEED),
+    prefix="cnn_")
 
 println("\nCNN FTBO best loss: $(result_cnn.best_loss)")
 
@@ -488,67 +493,12 @@ println("\n=== DeepSet Freeze-Thaw BO (9 dims, n_init=5, n_iter=55) ===")
 
 result_ds = freeze_thaw_bo_search(
     make_build_run_ds(),
-    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 0.5, 2.5, 0.5, 2.5],
-    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 3.5, 6.5, 3.5, 6.5];
+    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 0.5, 4.5, 0.5, 4.5],
+    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 3.5, 8.5, 3.5, 8.5];
     n_init  = 1,
-    n_iter  = 55,
+    n_iter  = 200,
     T_final = T_FINAL,
-    rng     = Xoshiro(BASE_SEED + 1))
+    rng     = Xoshiro(BASE_SEED + 1),
+    prefix="deepset_")
 
 println("\nDeepSet FTBO best loss: $(result_ds.best_loss)")
-
-# ============================================================
-# Retrain best configs from scratch using online data and save
-# ============================================================
-
-println("\n=== Retraining best CNN config ===")
-lr_cnn, h_cnn = decode_cnn(result_cnn.best_x)
-println("lr=$(lr_cnn)  hyperparams=$(h_cnn)")
-
-best_run_cnn = build_candidate_run((lr_cnn, h_cnn);
-    base_seed      = BASE_SEED,
-    input_dim      = INPUT_DIM_CNN,
-    βlims          = BETA_LIMS,
-    pot_per_batch  = POT_PER_BATCH,
-    trace_per_pot  = TRACE_PER_POT,
-    cut_per_trace  = CUT_PER_TRACE,
-    feature        = hist_feature,
-    stride_lims    = STRIDE_LIMS,
-    Nreplicas_lims = NREPLICAS_LIMS)
-
-run_epoch!(best_run_cnn, RETRAIN_BATCHES, false)
-acc_cnn, loss_cnn = test_accuracy!(best_run_cnn, TEST_BATCHES)
-println("CNN retrain: val_loss=$(loss_cnn)  acc=$(acc_cnn)")
-JLD2.jldsave(joinpath(@__DIR__, "best_ftbo_cnn.jld2"), model_state = Flux.state(best_run_cnn.model))
-println("Saved → $(joinpath(@__DIR__, "best_ftbo_cnn.jld2"))")
-
-println("\n=== Retraining best DeepSet config ===")
-lr_ds, h_ds = decode_ds(result_ds.best_x)
-println("lr=$(lr_ds)  hyperparams=$(h_ds)")
-
-best_run_ds = build_candidate_run((lr_ds, h_ds);
-    base_seed      = BASE_SEED,
-    input_dim      = INPUT_DIM_DS,
-    βlims          = BETA_LIMS,
-    pot_per_batch  = POT_PER_BATCH,
-    trace_per_pot  = TRACE_PER_POT,
-    cut_per_trace  = CUT_PER_TRACE,
-    feature        = deep_set_feature,
-    stride_lims    = STRIDE_LIMS,
-    Nreplicas_lims = NREPLICAS_LIMS)
-
-run_epoch!(best_run_ds, RETRAIN_BATCHES, false)
-acc_ds, loss_ds = test_accuracy!(best_run_ds, TEST_BATCHES)
-println("DeepSet retrain: val_loss=$(loss_ds)  acc=$(acc_ds)")
-JLD2.jldsave(joinpath(@__DIR__, "best_ftbo_ds.jld2"), model_state = Flux.state(best_run_ds.model))
-println("Saved → $(joinpath(@__DIR__, "best_ftbo_ds.jld2"))")
-
-# ── Overall winner ────────────────────────────────────────────────────────────
-if loss_cnn <= loss_ds
-    println("\nOverall winner: CNN (loss=$(loss_cnn))")
-    JLD2.jldsave(joinpath(@__DIR__, "best_ftbo.jld2"), model_state = Flux.state(best_run_cnn.model))
-else
-    println("\nOverall winner: DeepSet (loss=$(loss_ds))")
-    JLD2.jldsave(joinpath(@__DIR__, "best_ftbo.jld2"), model_state = Flux.state(best_run_ds.model))
-end
-println("Saved → $(joinpath(@__DIR__, "best_ftbo.jld2"))")
