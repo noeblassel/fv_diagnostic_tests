@@ -170,6 +170,74 @@ reset_rnn_state!(online)  # reset hidden state for next trajectory
 julia --project=. tests/runtests.jl
 ```
 
+### 5. Hyperparameter optimisation
+
+Two automated search strategies are provided in `hyperparameter_tuning/`. Both operate on a pre-generated **offline dataset** of FV trajectories, avoiding repeated simulation cost during the search.
+
+#### Step 0 — Generate the offline dataset
+
+```bash
+julia --project=. hyperparameter_tuning/make_dataset.jl
+```
+
+Writes `hyperparameter_tuning/hp_dataset.jld2` containing `train` and `test` splits used by both search scripts.
+
+#### Bayesian optimisation (`tune_bo.jl`)
+
+Fits a GP surrogate (SE-ARD kernel, MAP hyperparameters) and selects candidates via Upper-Confidence-Bound acquisition. Each candidate is trained for a fixed number of epochs before its test loss is recorded. Runs a 7-dimensional CNN search (50 iterations) and a 9-dimensional DeepSet search (60 iterations) sequentially.
+
+```bash
+julia --project=. hyperparameter_tuning/tune_bo.jl
+```
+
+Output files written to `hyperparameter_tuning/`:
+
+| File | Contents |
+|------|----------|
+| `bo_results_cnn.jld2` | All tried `X`, `y`, best `x`/loss, per-candidate train/test curves and model states |
+| `bo_results_ds.jld2` | Same for the DeepSet search |
+| `best_hope_bo_cnn.jld2` | Best CNN model state after retraining on online data |
+| `best_hope_bo_ds.jld2` | Best DeepSet model state after retraining on online data |
+| `best_hope_bo.jld2` | Overall winner (CNN or DeepSet) |
+
+#### Freeze-Thaw Bayesian optimisation (`tune_ftbo.jl`)
+
+Maintains a pool of partially-trained configs and allocates training budget adaptively: promising configs get more epochs while clearly poor ones are abandoned early. Uses a product GP kernel (SE-ARD over hyperparameters × Freeze-Thaw over training time).
+
+```bash
+julia --project=. hyperparameter_tuning/tune_ftbo.jl
+```
+
+Output files written to `hyperparameter_tuning/`:
+
+| File | Contents |
+|------|----------|
+| `ftbo_results_cnn.jld2` | Full pool with training curves and model states, best config |
+| `ftbo_results_ds.jld2` | Same for the DeepSet search |
+| `ftbo_checkpoint_cnn.jld2` | Rolling checkpoint updated after each iteration (crash recovery) |
+| `ftbo_checkpoint_ds.jld2` | Same for the DeepSet search |
+
+#### Loading results for post-analysis
+
+```julia
+using JLD2
+
+# BO results
+bo = JLD2.load("hyperparameter_tuning/bo_results_cnn.jld2")
+# bo["X"]        — Vector of hyperparameter vectors tried
+# bo["y"]        — Corresponding negated test losses
+# bo["best_x"]   — Best hyperparameter vector
+# bo["best_loss"]— Best test loss
+# bo["history"]  — Vector of NamedTuples: (call, x, train_losses, test_losses, test_accs, model_state)
+
+# FTBO results
+ftbo = JLD2.load("hyperparameter_tuning/ftbo_results_cnn.jld2")
+# ftbo["pool"]             — Vector of (x, ts, losses, model_state) per explored config
+# ftbo["best_x"]           — Best hyperparameter vector
+# ftbo["best_loss"]        — Best observed validation loss
+# ftbo["best_model_state"] — Flux model state of the best config
+```
+
 ## Key parameters
 
 ### Data generation (`get_batch`)

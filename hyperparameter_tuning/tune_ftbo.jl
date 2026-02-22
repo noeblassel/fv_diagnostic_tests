@@ -47,6 +47,7 @@ mutable struct FrozenConfig
     run::TrainingRun         # live model + optimizer (in memory)
     ts::Vector{Int}          # chunk indices at which loss was measured
     losses::Vector{Float64}  # corresponding validation losses
+    config_key::Any          # decoded discrete key; `nothing` if dedup disabled
 end
 
 # ── Product kernel: SE-ARD(x) ⊗ Freeze-Thaw time kernel(t) ─────────────────
@@ -112,46 +113,7 @@ function gp_predict(cache::GPCache, x_pred, t_pred)
     return μ, σ2
 end
 
-# ============================================================
-# Self-contained Nelder-Mead minimiser (no extra dependencies)
-# ============================================================
-
-function _nelder_mead(f, x0::Vector{Float64};
-                      max_iter::Int=500, tol::Float64=1e-7)
-    d = length(x0)
-    α_nm, γ_nm, ρ_nm, σ_nm = 1.0, 2.0, 0.5, 0.5
-
-    simplex = [copy(x0) for _ in 1:d+1]
-    for i in 1:d
-        simplex[i+1][i] += ifelse(abs(x0[i]) > 1e-8, 0.05*abs(x0[i]), 0.05)
-    end
-    vals = f.(simplex)
-
-    for _ in 1:max_iter
-        p = sortperm(vals); simplex = simplex[p]; vals = vals[p]
-        abs(vals[end] - vals[1]) < tol && break
-        c  = mean(simplex[1:d])          # centroid (best d points)
-        xr = c + α_nm*(c - simplex[end])
-        fr = f(xr)
-        if fr < vals[1]
-            xe = c + γ_nm*(xr - c); fe = f(xe)
-            simplex[end], vals[end] = fe < fr ? (xe, fe) : (xr, fr)
-        elseif fr < vals[end-1]
-            simplex[end], vals[end] = xr, fr
-        else
-            xc = c + ρ_nm*(simplex[end] - c); fc = f(xc)
-            if fc < vals[end]
-                simplex[end], vals[end] = xc, fc
-            else
-                for i in 2:d+1
-                    simplex[i] = simplex[1] + σ_nm*(simplex[i] - simplex[1])
-                    vals[i]    = f(simplex[i])
-                end
-            end
-        end
-    end
-    return simplex[1], vals[1]
-end
+include(joinpath(@__DIR__, "gp_utils.jl"))
 
 # ============================================================
 # MAP GP hyperparameter fitting for the 2D (x,t) product kernel
@@ -220,17 +182,19 @@ Returns a NamedTuple with:
 - `best_loss`   — its lowest observed validation loss
 """
 function freeze_thaw_bo_search(build_run, lb, ub;
-        n_init        = 5,
-        n_iter        = 45,
-        T_final       = 6,
-        β_ucb         = 2.0,
-        n_cand        = 2000,
-        α_t           = 1.0,
-        β_t           = 1.0,
-        noise         = 1.0,
-        hp_fit_every  = 3,
-        rng           = Xoshiro(42),
-        prefix="")
+        n_init          = 5,
+        n_iter          = 45,
+        T_final         = 6,
+        β_ucb           = 2.0,
+        n_cand          = 2000,
+        α_t             = 1.0,
+        β_t             = 1.0,
+        noise           = 1.0,
+        hp_fit_every    = 3,
+        rng             = Xoshiro(42),
+        config_key      = nothing,   # x -> comparable key; nothing = no dedup
+        prefix          = "",
+        checkpoint_path = nothing)
 
     d = length(lb)
 
@@ -259,16 +223,31 @@ function freeze_thaw_bo_search(build_run, lb, ub;
         call_count[] += 1
         run  = build_run(x, call_count[])
         loss = eval_chunk!(run)
-        push!(pool, FrozenConfig(copy(x), run, [1], [loss]))
+        key  = config_key !== nothing ? config_key(x) : nothing
+        push!(pool, FrozenConfig(copy(x), run, [1], [loss], key))
         return loss
     end
-
-    best_observed() = minimum(minimum(c.losses) for c in pool)
 
     # ── Initialisation: n_init random configs ────────────────────────────────
     println("  [FTBO] Initialising ($n_init random configs, $T_final epochs/config)...")
     for i in 1:n_init
-        x    = lb .+ rand(rng, d) .* (ub .- lb)
+        x = lb .+ rand(rng, d) .* (ub .- lb)
+        # --- dedup check ---
+        if config_key !== nothing && !isempty(pool)
+            key = config_key(x)
+            match_idx = findfirst(j -> pool[j].config_key == key &&
+                                       maximum(pool[j].ts) < T_final, 1:length(pool))
+            if match_idx !== nothing
+                cfg    = pool[match_idx]
+                t_next = maximum(cfg.ts) + 1
+                loss   = eval_chunk!(cfg.run)
+                push!(cfg.ts, t_next); push!(cfg.losses, loss)
+                println("  init $i/$n_init  DUPLICATE→THAW pool[$match_idx]  loss=$(round(loss; digits=4))")
+                flush(stdout)
+                continue
+            end
+        end
+        # --- end dedup check ---
         loss = launch_config!(x)
         println("  init $i/$n_init  loss=$(round(loss; digits=4))")
         flush(stdout)
@@ -335,6 +314,18 @@ function freeze_thaw_bo_search(build_run, lb, ub;
             end
         end
 
+        # Redirect :new → :thaw if candidate decodes to an existing non-exhausted config
+        if chosen_action == :new && config_key !== nothing
+            key_new   = config_key(chosen_x_new)
+            match_idx = findfirst(i -> pool[i].config_key == key_new &&
+                                       maximum(pool[i].ts) < T_final, 1:length(pool))
+            if match_idx !== nothing
+                println("  [FTBO] iter $iter/$n_iter  NEW→THAW: candidate has same config as pool[$match_idx]")
+                chosen_action   = :thaw
+                chosen_pool_idx = match_idx
+            end
+        end
+
         # Execute the chosen action
         if chosen_action == :thaw
             cfg    = pool[chosen_pool_idx]
@@ -354,11 +345,15 @@ function freeze_thaw_bo_search(build_run, lb, ub;
                     "  best=$(round(best_observed(); digits=4))")
         end
         flush(stdout)
+
+        if checkpoint_path !== nothing
+            pool_ckpt = [(x=cfg.x, ts=cfg.ts, losses=cfg.losses,
+                          model_state=Flux.state(cfg.run.model)) for cfg in pool]
+            JLD2.jldsave(checkpoint_path; pool=pool_ckpt, iter=iter)
+        end
     end
 
     best_cfg = argmin(cfg -> minimum(cfg.losses), pool)
-    JLD2.jldsave(joinpath(@__DIR__, "best_ftbo_$prefix.jld2"), model_state = Flux.state(best_cfg.model)) # checkpoint best performer
-
 
     return (pool        = pool,
             best_config = best_cfg,
@@ -471,19 +466,41 @@ end
 # CNN Freeze-Thaw BO  (7-dimensional, 50 total steps)
 # ============================================================
 
+cnn_config_key(x) = (round(x[1]; digits=1),
+                     round(Int,x[2]), round(Int,x[3]),
+                     round(Int,x[4]), round(Int,x[5]),
+                     round(Int,x[6]), round(Int,x[7]))
+ds_config_key(x)  = (round(x[1]; digits=1),
+                     round(Int,x[2]), round(Int,x[3]),
+                     round(Int,x[4]), round(Int,x[5]),
+                     round(Int,x[6]), round(Int,x[7]),
+                     round(Int,x[8]), round(Int,x[9]))
+
 println("\n=== CNN Freeze-Thaw BO (7 dims, n_init=5, n_iter=45) ===")
 
 result_cnn = freeze_thaw_bo_search(
     make_build_run_cnn(),
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5],
     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5];
-    n_init  = 10,
-    n_iter  = 200,
-    T_final = T_FINAL,
-    rng     = Xoshiro(BASE_SEED),
-    prefix="cnn_")
+    n_init          = 10,
+    n_iter          = 200,
+    T_final         = T_FINAL,
+    rng             = Xoshiro(BASE_SEED),
+    config_key      = cnn_config_key,
+    prefix          = "cnn_",
+    checkpoint_path = joinpath(@__DIR__, "ftbo_checkpoint_cnn.jld2"))
 
 println("\nCNN FTBO best loss: $(result_cnn.best_loss)")
+
+pool_data_cnn = [(x=cfg.x, ts=cfg.ts, losses=cfg.losses,
+                  model_state=Flux.state(cfg.run.model)) for cfg in result_cnn.pool]
+JLD2.jldsave(joinpath(@__DIR__, "ftbo_results_cnn.jld2");
+    pool             = pool_data_cnn,
+    best_x           = result_cnn.best_x,
+    best_loss        = result_cnn.best_loss,
+    best_model_state = Flux.state(result_cnn.best_config.run.model),
+)
+println("Saved → $(joinpath(@__DIR__, "ftbo_results_cnn.jld2"))")
 
 # ============================================================
 # DeepSet Freeze-Thaw BO  (9-dimensional, 60 total steps)
@@ -495,10 +512,22 @@ result_ds = freeze_thaw_bo_search(
     make_build_run_ds(),
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 0.5, 4.5, 0.5, 4.5],
     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 3.5, 8.5, 3.5, 8.5];
-    n_init  = 10,
-    n_iter  = 200,
-    T_final = T_FINAL,
-    rng     = Xoshiro(BASE_SEED + 1),
-    prefix="deepset_")
+    n_init          = 10,
+    n_iter          = 200,
+    T_final         = T_FINAL,
+    rng             = Xoshiro(BASE_SEED + 1),
+    config_key      = ds_config_key,
+    prefix          = "deepset_",
+    checkpoint_path = joinpath(@__DIR__, "ftbo_checkpoint_ds.jld2"))
 
 println("\nDeepSet FTBO best loss: $(result_ds.best_loss)")
+
+pool_data_ds = [(x=cfg.x, ts=cfg.ts, losses=cfg.losses,
+                 model_state=Flux.state(cfg.run.model)) for cfg in result_ds.pool]
+JLD2.jldsave(joinpath(@__DIR__, "ftbo_results_ds.jld2");
+    pool             = pool_data_ds,
+    best_x           = result_ds.best_x,
+    best_loss        = result_ds.best_loss,
+    best_model_state = Flux.state(result_ds.best_config.run.model),
+)
+println("Saved → $(joinpath(@__DIR__, "ftbo_results_ds.jld2"))")

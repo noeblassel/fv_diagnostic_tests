@@ -30,46 +30,7 @@ const HP_TEST  = JLD2.load(DATASET_PATH, "test")
 #     round(Int, x[i]) inside the objective.
 # ============================================================
 
-# ============================================================
-# Self-contained Nelder-Mead minimiser (no extra dependencies)
-# ============================================================
-
-function _nelder_mead(f, x0::Vector{Float64};
-                      max_iter::Int=500, tol::Float64=1e-7)
-    d = length(x0)
-    α_nm, γ_nm, ρ_nm, σ_nm = 1.0, 2.0, 0.5, 0.5
-
-    simplex = [copy(x0) for _ in 1:d+1]
-    for i in 1:d
-        simplex[i+1][i] += ifelse(abs(x0[i]) > 1e-8, 0.05*abs(x0[i]), 0.05)
-    end
-    vals = f.(simplex)
-
-    for _ in 1:max_iter
-        p = sortperm(vals); simplex = simplex[p]; vals = vals[p]
-        abs(vals[end] - vals[1]) < tol && break
-        c  = mean(simplex[1:d])          # centroid (best d points)
-        xr = c + α_nm*(c - simplex[end])
-        fr = f(xr)
-        if fr < vals[1]
-            xe = c + γ_nm*(xr - c); fe = f(xe)
-            simplex[end], vals[end] = fe < fr ? (xe, fe) : (xr, fr)
-        elseif fr < vals[end-1]
-            simplex[end], vals[end] = xr, fr
-        else
-            xc = c + ρ_nm*(simplex[end] - c); fc = f(xc)
-            if fc < vals[end]
-                simplex[end], vals[end] = xc, fc
-            else
-                for i in 2:d+1
-                    simplex[i] = simplex[1] + σ_nm*(simplex[i] - simplex[1])
-                    vals[i]    = f(simplex[i])
-                end
-            end
-        end
-    end
-    return simplex[1], vals[1]
-end
+include(joinpath(@__DIR__, "gp_utils.jl"))
 
 # ============================================================
 # MAP GP hyperparameter fitting
@@ -124,17 +85,30 @@ function bo_search(objective, lb, ub;
         β             = 2.0,
         n_cand        = 2000,
         hp_fit_every  = 5,
+        config_key    = nothing,   # x -> comparable key; nothing = no dedup
         rng           = Xoshiro(42))
 
     d = length(lb)
 
     X = Vector{Vector{Float64}}()
     y = Vector{Float64}()
+    seen_keys = Set{Any}()
 
     # ── Initial random exploration ───────────────────────────
     println("  [BO] Random initialisation ($n_init points)...")
     for i in 1:n_init
         x = lb .+ rand(rng, d) .* (ub .- lb)
+        if config_key !== nothing
+            key = config_key(x)
+            # Redraw up to 20 times if already seen
+            attempts = 0
+            while key in seen_keys && attempts < 20
+                x   = lb .+ rand(rng, d) .* (ub .- lb)
+                key = config_key(x)
+                attempts += 1
+            end
+            push!(seen_keys, key)
+        end
         push!(X, x)
         val = objective(x)
         push!(y, val)
@@ -168,6 +142,10 @@ function bo_search(objective, lb, ub;
 
         # Random UCB search over the box
         cands = [lb .+ rand(rng, d) .* (ub .- lb) for _ in 1:n_cand]
+        if config_key !== nothing
+            cands_new = filter(xc -> config_key(xc) ∉ seen_keys, cands)
+            cands = isempty(cands_new) ? cands : cands_new
+        end
         X_cand = hcat(cands...)
         mu, sigma2 = predict_y(gp, X_cand)
         ucb = mu .+ β .* sqrt.(max.(sigma2, 1e-10))
@@ -177,6 +155,9 @@ function bo_search(objective, lb, ub;
         y_next = objective(x_next)
         push!(X, x_next)
         push!(y, y_next)
+        if config_key !== nothing
+            push!(seen_keys, config_key(x_next))
+        end
 
         if y_next > best_y
             best_y = y_next
@@ -214,6 +195,7 @@ function make_objective(;
         stride_lims    = STRIDE_LIMS,
         Nreplicas_lims = NREPLICAS_LIMS)
 
+    history    = NamedTuple[]
     call_count = Ref(0)
 
     function objective(x)
@@ -242,20 +224,34 @@ function make_objective(;
 
         println("  model: $(repr("text/plain",run.model))")
 
-        test_loss = 0.0
+        train_losses = Float64[]
+        test_losses  = Float64[]
+        test_accs    = Float64[]
         for epoch in 1:train_epochs
             train_loss  = run_epoch_offline!(run, HP_TRAIN)
             test_result = test_loss_offline!(run, HP_TEST)
-            test_loss   = test_result.loss
+            push!(train_losses, train_loss)
+            push!(test_losses,  test_result.loss)
+            push!(test_accs,    test_result.acc)
             println("    epoch $epoch/$train_epochs  train=$(round(train_loss; digits=4))" *
-                    "  test=$(round(test_loss; digits=4))" *
+                    "  test=$(round(test_result.loss; digits=4))" *
                     "  acc=$(round(test_result.acc * 100; digits=1))%")
             flush(stdout)
         end
-        return -test_loss    # BO maximises; we minimise loss
+
+        push!(history, (
+            call         = call_count[],
+            x            = copy(x),
+            train_losses = train_losses,
+            test_losses  = test_losses,
+            test_accs    = test_accs,
+            model_state  = Flux.state(run.model),
+        ))
+
+        return -test_losses[end]    # BO maximises; we minimise loss
     end
 
-    return objective
+    return objective, history
 end
 
 # ============================================================
@@ -286,7 +282,7 @@ ds_builder(x) = (DeepSetFeaturizerHyperParams(
     round(Int, x[6]), round(Int, x[7]),
     round(Int, x[8]), round(Int, x[9])), 4)
 
-obj_ds = make_objective(;
+obj_ds, hist_ds = make_objective(;
     base_seed          = BASE_SEED,
     input_dim          = INPUT_DIM_DS,
     βlims              = BETA_LIMS,
@@ -299,14 +295,34 @@ obj_ds = make_objective(;
     stride_lims        = STRIDE_LIMS,
     Nreplicas_lims     = NREPLICAS_LIMS)
 
+cnn_config_key(x) = (round(x[1]; digits=1),
+                     round(Int,x[2]), round(Int,x[3]),
+                     round(Int,x[4]), round(Int,x[5]),
+                     round(Int,x[6]), round(Int,x[7]))
+ds_config_key(x)  = (round(x[1]; digits=1),
+                     round(Int,x[2]), round(Int,x[3]),
+                     round(Int,x[4]), round(Int,x[5]),
+                     round(Int,x[6]), round(Int,x[7]),
+                     round(Int,x[8]), round(Int,x[9]))
+
 println("\n=== DeepSet Bayesian Optimisation (9 dims, 60 iterations) ===")
 
 result_ds = bo_search(obj_ds,
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 0.5, 2.5, 0.5, 2.5],
     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 3.5, 6.5, 3.5, 6.5];
-    n_init = 5,
-    n_iter = 55,
-    rng    = Xoshiro(BASE_SEED + 1))
+    n_init     = 5,
+    n_iter     = 55,
+    config_key = ds_config_key,
+    rng        = Xoshiro(BASE_SEED + 1))
+
+JLD2.jldsave(joinpath(@__DIR__, "bo_results_ds.jld2");
+    X         = result_ds.X,
+    y         = result_ds.y,
+    best_x    = result_ds.observed_optimizer,
+    best_loss = -result_ds.observed_optimum,
+    history   = hist_ds,
+)
+println("Saved → $(joinpath(@__DIR__, "bo_results_ds.jld2"))")
 
     # ============================================================
 # CNN BO search (7-dimensional)
@@ -321,7 +337,7 @@ result_ds = bo_search(obj_ds,
 
 cnn_builder(x) = (CNNFeaturizerHyperParams(round(Int, x[6]), round(Int, x[7])), 2)
 
-obj_cnn = make_objective(;
+obj_cnn, hist_cnn = make_objective(;
     base_seed          = BASE_SEED,
     input_dim          = INPUT_DIM_CNN,
     βlims              = BETA_LIMS,
@@ -339,9 +355,19 @@ println("\n=== CNN Bayesian Optimisation (7 dims, 50 iterations) ===")
 result_cnn = bo_search(obj_cnn,
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5],
     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5];
-    n_init = 5,
-    n_iter = 45,
-    rng    = Xoshiro(BASE_SEED))
+    n_init     = 5,
+    n_iter     = 45,
+    config_key = cnn_config_key,
+    rng        = Xoshiro(BASE_SEED))
+
+JLD2.jldsave(joinpath(@__DIR__, "bo_results_cnn.jld2");
+    X         = result_cnn.X,
+    y         = result_cnn.y,
+    best_x    = result_cnn.observed_optimizer,
+    best_loss = -result_cnn.observed_optimum,
+    history   = hist_cnn,
+)
+println("Saved → $(joinpath(@__DIR__, "bo_results_cnn.jld2"))")
 
 # ============================================================
 # Decode helpers
