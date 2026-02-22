@@ -370,7 +370,7 @@ const INPUT_DIM_CNN  = 64
 const INPUT_DIM_DS   = 200
 const INPUT_DIM_ATTN = 200
 const BETA_LIMS      = (1.0, 3.0)
-const T_FINAL        = 20      # max training epochs per config (GP extrapolation horizon)
+const T_FINAL        = 30      # max training epochs per config (GP extrapolation horizon)
 const POT_PER_BATCH  = 5
 const TRACE_PER_POT  = 5
 const CUT_PER_TRACE  = 2
@@ -469,7 +469,7 @@ end
 # x[3]: rnn_width_exp    [4.5, 6.5]
 # x[4]: mlp_depth        [0.5, 2.5]
 # x[5]: mlp_width_exp    [4.5, 6.5]
-# x[6]: log2(n_subsample) [6.0, 9.0]  → 64 to 512
+# x[6]: log2(n_subsample) [5.5, 10.5]  → 64 to 1024
 # x[7]: n_heads_exp      [0.5, 3.5]  → 1, 2, or 3
 # x[8]: width_exp        [2.5, 5.5]  → 3, 4, or 5 (clamped ≥ x[7])
 # x[9]: depth            [0.5, 3.5]  → 1, 2, or 3
@@ -517,36 +517,36 @@ attn_config_key(x) = (round(x[1]; digits=1),
 # CNN Freeze-Thaw BO  (7-dimensional, 50 total steps)
 # ============================================================
 
-# cnn_config_key(x) = (round(x[1]; digits=1),
-#                      round(Int,x[2]), round(Int,x[3]),
-#                      round(Int,x[4]), round(Int,x[5]),
-#                      round(Int,x[6]), round(Int,x[7]))
+cnn_config_key(x) = (round(x[1]; digits=1),
+                     round(Int,x[2]), round(Int,x[3]),
+                     round(Int,x[4]), round(Int,x[5]),
+                     round(Int,x[6]), round(Int,x[7]))
 
-# println("\n=== CNN Freeze-Thaw BO (7 dims, n_init=5, n_iter=45) ===")
+println("\n=== CNN Freeze-Thaw BO (7 dims, n_init=5, n_iter=45) ===")
 
-# result_cnn = freeze_thaw_bo_search(
-#     make_build_run_cnn(),
-#     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5],
-#     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5];
-#     n_init          = 10,
-#     n_iter          = 200,
-#     T_final         = T_FINAL,
-#     rng             = Xoshiro(BASE_SEED),
-#     config_key      = cnn_config_key,
-#     prefix          = "cnn_",
-#     checkpoint_path = joinpath(@__DIR__, "ftbo_checkpoint_cnn.jld2"))
+result_cnn = freeze_thaw_bo_search(
+    make_build_run_cnn(),
+    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5],
+    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5];
+    n_init          = 10,
+    n_iter          = 500,
+    T_final         = T_FINAL,
+    rng             = Xoshiro(BASE_SEED),
+    config_key      = cnn_config_key,
+    prefix          = "cnn_",
+    checkpoint_path = joinpath(@__DIR__, "ftbo_checkpoint_cnn.jld2"))
 
-# println("\nCNN FTBO best loss: $(result_cnn.best_loss)")
+println("\nCNN FTBO best loss: $(result_cnn.best_loss)")
 
-# pool_data_cnn = [(x=cfg.x, ts=cfg.ts, losses=cfg.losses,
-#                   model_state=Flux.state(cfg.run.model)) for cfg in result_cnn.pool]
-# JLD2.jldsave(joinpath(@__DIR__, "ftbo_results_cnn.jld2");
-#     pool             = pool_data_cnn,
-#     best_x           = result_cnn.best_x,
-#     best_loss        = result_cnn.best_loss,
-#     best_model_state = Flux.state(result_cnn.best_config.run.model),
-# )
-# println("Saved → $(joinpath(@__DIR__, "ftbo_results_cnn.jld2"))")
+pool_data_cnn = [(x=cfg.x, ts=cfg.ts, losses=cfg.losses,
+                  model_state=Flux.state(cfg.run.model)) for cfg in result_cnn.pool]
+JLD2.jldsave(joinpath(@__DIR__, "ftbo_results_cnn.jld2");
+    pool             = pool_data_cnn,
+    best_x           = result_cnn.best_x,
+    best_loss        = result_cnn.best_loss,
+    best_model_state = Flux.state(result_cnn.best_config.run.model),
+)
+println("Saved → $(joinpath(@__DIR__, "ftbo_results_cnn.jld2"))")
 
 # ============================================================
 # DeepSet Freeze-Thaw BO  (9-dimensional, 60 total steps)
@@ -565,7 +565,7 @@ result_ds = freeze_thaw_bo_search(
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 0.5, 4.5, 0.5, 4.5],
     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 3.5, 8.5, 3.5, 8.5];
     n_init          = 10,
-    n_iter          = 200,
+    n_iter          = 500,
     T_final         = T_FINAL,
     rng             = Xoshiro(BASE_SEED + 1),
     config_key      = ds_config_key,
@@ -592,10 +592,10 @@ println("\n=== Attention Freeze-Thaw BO (9 dims, n_init=10, n_iter=200) ===")
 
 result_attn = freeze_thaw_bo_search(
     make_build_run_attn(),
-    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 6.0, 0.5, 2.5, 0.5],
-    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 9.0, 3.5, 5.5, 3.5];
+    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 5.5, 0.5, 2.5, 0.5],
+    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 10.5, 3.5, 5.5, 3.5];
     n_init          = 10,
-    n_iter          = 200,
+    n_iter          = 500,
     T_final         = T_FINAL,
     rng             = Xoshiro(BASE_SEED + 2),
     config_key      = attn_config_key,
