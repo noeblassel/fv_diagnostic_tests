@@ -368,6 +368,7 @@ end
 const BASE_SEED      = 2026
 const INPUT_DIM_CNN  = 64
 const INPUT_DIM_DS   = 200
+const INPUT_DIM_ATTN = 200
 const BETA_LIMS      = (1.0, 3.0)
 const T_FINAL        = 20      # max training epochs per config (GP extrapolation horizon)
 const POT_PER_BATCH  = 5
@@ -463,49 +464,99 @@ function make_build_run_ds()
     return build_run
 end
 
+# x[1]: log(lr)          [log(1e-4), log(1e-2)]
+# x[2]: rnn_depth        [0.5, 2.5]
+# x[3]: rnn_width_exp    [4.5, 6.5]
+# x[4]: mlp_depth        [0.5, 2.5]
+# x[5]: mlp_width_exp    [4.5, 6.5]
+# x[6]: log2(n_subsample) [6.0, 9.0]  → 64 to 512
+# x[7]: n_heads_exp      [0.5, 3.5]  → 1, 2, or 3
+# x[8]: width_exp        [2.5, 5.5]  → 3, 4, or 5 (clamped ≥ x[7])
+# x[9]: depth            [0.5, 3.5]  → 1, 2, or 3
+
+function decode_attn(x)
+    lr            = exp(x[1])
+    rnn_depth     = round(Int, x[2]);  rnn_width_exp = round(Int, x[3])
+    mlp_depth     = round(Int, x[4]);  mlp_width_exp = round(Int, x[5])
+    n_subsample   = 2^round(Int, x[6])
+    n_heads_exp   = round(Int, x[7])
+    width_exp     = max(round(Int, x[8]), n_heads_exp)
+    depth         = round(Int, x[9])
+    feat_hp = AttentionFeaturizerHyperParams(n_subsample, n_heads_exp, width_exp, depth)
+    h = RNNDiagnosticHyperParams(feat_hp, rnn_depth, rnn_width_exp, mlp_depth, mlp_width_exp)
+    return lr, h
+end
+
+function make_build_run_attn()
+    function build_run(x, seed_offset)
+        lr, h = decode_attn(x)
+        return build_candidate_run((lr, h);
+            base_seed      = BASE_SEED + seed_offset,
+            input_dim      = INPUT_DIM_ATTN,
+            βlims          = BETA_LIMS,
+            pot_per_batch  = POT_PER_BATCH,
+            trace_per_pot  = TRACE_PER_POT,
+            cut_per_trace  = CUT_PER_TRACE,
+            feature        = deep_set_feature,
+            stride_lims    = STRIDE_LIMS,
+            Nreplicas_lims = NREPLICAS_LIMS,
+            n_meta         = 2)
+    end
+    return build_run
+end
+
+attn_config_key(x) = (round(x[1]; digits=1),
+                       round(Int,x[2]), round(Int,x[3]),
+                       round(Int,x[4]), round(Int,x[5]),
+                       round(Int,x[6]),
+                       round(Int,x[7]),
+                       max(round(Int,x[8]), round(Int,x[7])),
+                       round(Int,x[9]))
+
 # ============================================================
 # CNN Freeze-Thaw BO  (7-dimensional, 50 total steps)
 # ============================================================
 
-cnn_config_key(x) = (round(x[1]; digits=1),
-                     round(Int,x[2]), round(Int,x[3]),
-                     round(Int,x[4]), round(Int,x[5]),
-                     round(Int,x[6]), round(Int,x[7]))
+# cnn_config_key(x) = (round(x[1]; digits=1),
+#                      round(Int,x[2]), round(Int,x[3]),
+#                      round(Int,x[4]), round(Int,x[5]),
+#                      round(Int,x[6]), round(Int,x[7]))
+
+# println("\n=== CNN Freeze-Thaw BO (7 dims, n_init=5, n_iter=45) ===")
+
+# result_cnn = freeze_thaw_bo_search(
+#     make_build_run_cnn(),
+#     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5],
+#     [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5];
+#     n_init          = 10,
+#     n_iter          = 200,
+#     T_final         = T_FINAL,
+#     rng             = Xoshiro(BASE_SEED),
+#     config_key      = cnn_config_key,
+#     prefix          = "cnn_",
+#     checkpoint_path = joinpath(@__DIR__, "ftbo_checkpoint_cnn.jld2"))
+
+# println("\nCNN FTBO best loss: $(result_cnn.best_loss)")
+
+# pool_data_cnn = [(x=cfg.x, ts=cfg.ts, losses=cfg.losses,
+#                   model_state=Flux.state(cfg.run.model)) for cfg in result_cnn.pool]
+# JLD2.jldsave(joinpath(@__DIR__, "ftbo_results_cnn.jld2");
+#     pool             = pool_data_cnn,
+#     best_x           = result_cnn.best_x,
+#     best_loss        = result_cnn.best_loss,
+#     best_model_state = Flux.state(result_cnn.best_config.run.model),
+# )
+# println("Saved → $(joinpath(@__DIR__, "ftbo_results_cnn.jld2"))")
+
+# ============================================================
+# DeepSet Freeze-Thaw BO  (9-dimensional, 60 total steps)
+# ============================================================
+
 ds_config_key(x)  = (round(x[1]; digits=1),
                      round(Int,x[2]), round(Int,x[3]),
                      round(Int,x[4]), round(Int,x[5]),
                      round(Int,x[6]), round(Int,x[7]),
                      round(Int,x[8]), round(Int,x[9]))
-
-println("\n=== CNN Freeze-Thaw BO (7 dims, n_init=5, n_iter=45) ===")
-
-result_cnn = freeze_thaw_bo_search(
-    make_build_run_cnn(),
-    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5],
-    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5];
-    n_init          = 10,
-    n_iter          = 200,
-    T_final         = T_FINAL,
-    rng             = Xoshiro(BASE_SEED),
-    config_key      = cnn_config_key,
-    prefix          = "cnn_",
-    checkpoint_path = joinpath(@__DIR__, "ftbo_checkpoint_cnn.jld2"))
-
-println("\nCNN FTBO best loss: $(result_cnn.best_loss)")
-
-pool_data_cnn = [(x=cfg.x, ts=cfg.ts, losses=cfg.losses,
-                  model_state=Flux.state(cfg.run.model)) for cfg in result_cnn.pool]
-JLD2.jldsave(joinpath(@__DIR__, "ftbo_results_cnn.jld2");
-    pool             = pool_data_cnn,
-    best_x           = result_cnn.best_x,
-    best_loss        = result_cnn.best_loss,
-    best_model_state = Flux.state(result_cnn.best_config.run.model),
-)
-println("Saved → $(joinpath(@__DIR__, "ftbo_results_cnn.jld2"))")
-
-# ============================================================
-# DeepSet Freeze-Thaw BO  (9-dimensional, 60 total steps)
-# ============================================================
 
 println("\n=== DeepSet Freeze-Thaw BO (9 dims, n_init=5, n_iter=55) ===")
 
@@ -532,3 +583,33 @@ JLD2.jldsave(joinpath(@__DIR__, "ftbo_results_ds.jld2");
     best_model_state = Flux.state(result_ds.best_config.run.model),
 )
 println("Saved → $(joinpath(@__DIR__, "ftbo_results_ds.jld2"))")
+
+# ============================================================
+# Attention Freeze-Thaw BO  (9-dimensional)
+# ============================================================
+
+println("\n=== Attention Freeze-Thaw BO (9 dims, n_init=10, n_iter=200) ===")
+
+result_attn = freeze_thaw_bo_search(
+    make_build_run_attn(),
+    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 6.0, 0.5, 2.5, 0.5],
+    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 9.0, 3.5, 5.5, 3.5];
+    n_init          = 10,
+    n_iter          = 200,
+    T_final         = T_FINAL,
+    rng             = Xoshiro(BASE_SEED + 2),
+    config_key      = attn_config_key,
+    prefix          = "attn_",
+    checkpoint_path = joinpath(@__DIR__, "ftbo_checkpoint_attn.jld2"))
+
+println("\nAttention FTBO best loss: $(result_attn.best_loss)")
+
+pool_data_attn = [(x=cfg.x, ts=cfg.ts, losses=cfg.losses,
+                   model_state=Flux.state(cfg.run.model)) for cfg in result_attn.pool]
+JLD2.jldsave(joinpath(@__DIR__, "ftbo_results_attn.jld2");
+    pool             = pool_data_attn,
+    best_x           = result_attn.best_x,
+    best_loss        = result_attn.best_loss,
+    best_model_state = Flux.state(result_attn.best_config.run.model),
+)
+println("Saved → $(joinpath(@__DIR__, "ftbo_results_attn.jld2"))")

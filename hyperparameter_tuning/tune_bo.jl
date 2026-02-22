@@ -263,6 +263,7 @@ end
 const BASE_SEED       = 2022
 const INPUT_DIM_CNN   = 64
 const INPUT_DIM_DS    = 200    # max particles for DeepSet
+const INPUT_DIM_ATTN  = 200    # same Nmax as DeepSet
 const BETA_LIMS       = (1.0, 3.0)
 const TRAIN_EPOCHS    = 10     # epochs per BO candidate evaluation
 const POT_PER_BATCH   = 5
@@ -307,6 +308,13 @@ ds_config_key(x)  = (round(x[1]; digits=1),
                      round(Int,x[4]), round(Int,x[5]),
                      round(Int,x[6]), round(Int,x[7]),
                      round(Int,x[8]), round(Int,x[9]))
+attn_config_key(x) = (round(x[1]; digits=1),
+                      round(Int,x[2]), round(Int,x[3]),
+                      round(Int,x[4]), round(Int,x[5]),
+                      round(Int,x[6]),
+                      round(Int,x[7]),
+                      max(round(Int,x[8]), round(Int,x[7])),
+                      round(Int,x[9]))
 
 println("\n=== DeepSet Bayesian Optimisation (9 dims, 60 iterations) ===")
 
@@ -326,6 +334,55 @@ JLD2.jldsave(joinpath(@__DIR__, "bo_results_ds.jld2");
     history   = hist_ds,
 )
 println("Saved → $(joinpath(@__DIR__, "bo_results_ds.jld2"))")
+
+# ============================================================
+# Attention BO search (9-dimensional)
+# ============================================================
+# x[1–5]: same as CNN/DS (lr, rnn/mlp depths & widths)
+# x[6]: log2(n_subsample) [6.0, 9.0]  → 64 to 512
+# x[7]: n_heads_exp       [0.5, 3.5]  → 1, 2, or 3
+# x[8]: width_exp         [2.5, 5.5]  → 3, 4, or 5 (clamped ≥ x[7])
+# x[9]: depth             [0.5, 3.5]  → 1, 2, or 3
+
+attn_builder(x) = (AttentionFeaturizerHyperParams(
+    2^round(Int, x[6]),                              # n_subsample
+    round(Int, x[7]),                                # n_heads_exponent
+    max(round(Int, x[8]), round(Int, x[7])),         # width_exponent (≥ n_heads_exp)
+    round(Int, x[9])),                               # depth
+    2)                                               # n_meta
+
+obj_attn, hist_attn = make_objective(;
+    base_seed          = BASE_SEED,
+    input_dim          = INPUT_DIM_ATTN,
+    βlims              = BETA_LIMS,
+    train_epochs       = TRAIN_EPOCHS,
+    pot_per_batch      = POT_PER_BATCH,
+    trace_per_pot      = TRACE_PER_POT,
+    cut_per_trace      = CUT_PER_TRACE,
+    feature            = deep_set_feature,
+    featurizer_builder = attn_builder,
+    stride_lims        = STRIDE_LIMS,
+    Nreplicas_lims     = NREPLICAS_LIMS,
+    n_meta             = 2)
+
+println("\n=== Attention Bayesian Optimisation (9 dims, 60 iterations) ===")
+
+result_attn = bo_search(obj_attn,
+    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 6.0, 0.5, 2.5, 0.5],
+    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 9.0, 3.5, 5.5, 3.5];
+    n_init     = 5,
+    n_iter     = 55,
+    config_key = attn_config_key,
+    rng        = Xoshiro(BASE_SEED + 2))
+
+JLD2.jldsave(joinpath(@__DIR__, "bo_results_attn.jld2");
+    X         = result_attn.X,
+    y         = result_attn.y,
+    best_x    = result_attn.observed_optimizer,
+    best_loss = -result_attn.observed_optimum,
+    history   = hist_attn,
+)
+println("Saved → $(joinpath(@__DIR__, "bo_results_attn.jld2"))")
 
     # ============================================================
 # CNN BO search (7-dimensional)
@@ -407,6 +464,19 @@ function decode_ds(x)
     return lr, h
 end
 
+function decode_attn(x)
+    lr            = exp(x[1])
+    rnn_depth     = round(Int, x[2]);  rnn_width_exp = round(Int, x[3])
+    mlp_depth     = round(Int, x[4]);  mlp_width_exp = round(Int, x[5])
+    n_subsample   = 2^round(Int, x[6])
+    n_heads_exp   = round(Int, x[7])
+    width_exp     = max(round(Int, x[8]), n_heads_exp)
+    depth         = round(Int, x[9])
+    feat_hp = AttentionFeaturizerHyperParams(n_subsample, n_heads_exp, width_exp, depth)
+    h = RNNDiagnosticHyperParams(feat_hp, rnn_depth, rnn_width_exp, mlp_depth, mlp_width_exp)
+    return lr, h
+end
+
 # ============================================================
 # Retrain best configs from scratch using online data and save
 # ============================================================
@@ -458,12 +528,40 @@ println("DeepSet retrain: val_loss=$(loss_ds)  acc=$(acc_ds)")
 JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo_ds.jld2"), model_state=Flux.state(best_run_ds.model))
 println("Saved → $(joinpath(@__DIR__, "best_hope_bo_ds.jld2"))")
 
+println("\n=== Retraining best Attention config ===")
+lr_attn, h_attn = decode_attn(result_attn.observed_optimizer)
+println("lr=$(lr_attn)  hyperparams=$(h_attn)")
+
+best_run_attn = build_candidate_run((lr_attn, h_attn);
+    base_seed      = BASE_SEED,
+    input_dim      = INPUT_DIM_ATTN,
+    βlims          = BETA_LIMS,
+    pot_per_batch  = POT_PER_BATCH,
+    trace_per_pot  = TRACE_PER_POT,
+    cut_per_trace  = CUT_PER_TRACE,
+    feature        = deep_set_feature,
+    stride_lims    = STRIDE_LIMS,
+    Nreplicas_lims = NREPLICAS_LIMS,
+    n_meta         = 2)
+
+run_epoch_offline!(best_run_attn, HP_TRAIN)
+retrain_result_attn = test_loss_offline!(best_run_attn, HP_TEST)
+loss_attn = retrain_result_attn.loss
+acc_attn  = retrain_result_attn.acc
+println("Attention retrain: val_loss=$(loss_attn)  acc=$(acc_attn)")
+JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo_attn.jld2"), model_state=Flux.state(best_run_attn.model))
+println("Saved → $(joinpath(@__DIR__, "best_hope_bo_attn.jld2"))")
+
 # ── Overall winner ───────────────────────────────────────────
-if loss_cnn <= loss_ds
+best_loss_bo = min(loss_cnn, loss_ds, loss_attn)
+if loss_cnn == best_loss_bo
     println("\nOverall winner: CNN (loss=$(loss_cnn))")
     JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo.jld2"), model_state=Flux.state(best_run_cnn.model))
-else
+elseif loss_ds == best_loss_bo
     println("\nOverall winner: DeepSet (loss=$(loss_ds))")
     JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo.jld2"), model_state=Flux.state(best_run_ds.model))
+else
+    println("\nOverall winner: Attention (loss=$(loss_attn))")
+    JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo.jld2"), model_state=Flux.state(best_run_attn.model))
 end
 println("Saved → $(joinpath(@__DIR__, "best_hope_bo.jld2"))")

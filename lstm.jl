@@ -127,6 +127,112 @@ function (f::DeepSetFeaturizer)(x)
 end
 
 # ========================
+# Attention Featurizer
+# ========================
+
+struct AttentionBlock{A, N1, N2, F1, F2}
+    attn::A     # Flux.MultiHeadAttention(d_model; nheads=n_heads)
+    norm1::N1   # Flux.LayerNorm(d_model)  — pre-LN before attention
+    norm2::N2   # Flux.LayerNorm(d_model)  — pre-LN before FF
+    ff1::F1     # Dense(d_model => 4*d_model, gelu)
+    ff2::F2     # Dense(4*d_model => d_model)
+end
+
+Flux.@layer AttentionBlock
+
+function AttentionBlock(d_model::Int, n_heads::Int; rng=Random.GLOBAL_RNG)
+    init = Flux.glorot_uniform(rng)
+    AttentionBlock(
+        Flux.MultiHeadAttention(d_model; nheads=n_heads, init=init),
+        Flux.LayerNorm(d_model),
+        Flux.LayerNorm(d_model),
+        Dense(d_model => 4*d_model, gelu; init=init),
+        Dense(4*d_model => d_model; init=init),
+    )
+end
+
+function (b::AttentionBlock)(x)
+    # x: (d_model, n_particles, n_samples)
+    x_n = b.norm1(x)
+    attn_out, _ = b.attn(x_n, x_n, x_n)   # self-attention; returns (out, weights)
+    x = x + attn_out
+    d, np, ns = size(x)
+    x_n = b.norm2(x)
+    ff_out = b.ff2(b.ff1(reshape(x_n, d, np * ns)))
+    x + reshape(ff_out, d, np, ns)
+end
+
+struct AttentionFeaturizer{E<:Dense, T<:Chain, N} <: AbstractFeaturizer
+    embedding::E     # Dense(n_meta => d_model)   — projects [pos; cond] → token
+    blocks::T        # Chain of AttentionBlocks
+    output_norm::N   # Flux.LayerNorm(d_model)    — final norm before pooling
+    output_dim::Int  # = d_model
+    n_meta::Int      # must be ≥ 2: meta[1]=N_actual mask, meta[2:end]=conditioning
+    n_subsample::Int
+end
+
+Flux.@layer AttentionFeaturizer
+
+function AttentionFeaturizer(; n_meta::Int=2, d_model::Int, n_heads::Int,
+                               depth::Int, n_subsample::Int, rng=Random.GLOBAL_RNG)
+    @assert d_model % n_heads == 0 "d_model must be divisible by n_heads"
+    @assert n_meta >= 2
+    init = Flux.glorot_uniform(rng)
+    # Each token input: [particle_pos (1); conditioning_scalars (n_meta-1)] = n_meta dims
+    embedding   = Dense(n_meta => d_model; init=init)
+    blocks      = Chain([AttentionBlock(d_model, n_heads; rng=rng) for _ in 1:depth]...)
+    output_norm = Flux.LayerNorm(d_model)
+    AttentionFeaturizer(embedding, blocks, output_norm, d_model, n_meta, n_subsample)
+end
+
+function (f::AttentionFeaturizer)(x)
+    # x: (Nmax + n_meta, 1, n_samples)
+    total_dim, _, n_samples = size(x)
+    Nmax  = total_dim - f.n_meta
+    x_p   = x[1:Nmax, 1, :]          # (Nmax, n_samples) — zero-padded positions
+    x_m   = x[(Nmax+1):end, 1, :]    # (n_meta, n_samples) — [N_actual; cond...]
+    N_vals = x_m[1, :]               # (n_samples,) — actual particle counts
+    x_cond = x_m[2:end, :]           # (n_meta-1, n_samples)
+
+    n_sub = f.n_subsample
+
+    # Subsample particles — wrap in Zygote.ignore so discrete sampling is stop-gradient
+    x_sub, sub_N = Zygote.ignore() do
+        x_sub_inner = zeros(Float32, n_sub, n_samples)
+        sub_N_inner = zeros(Float32, n_samples)
+        x_p_cpu = Array(x_p)
+        for s in 1:n_samples
+            N_s = round(Int, N_vals[s])
+            k   = min(N_s, n_sub)
+            idx = k < N_s ? randperm(N_s)[1:k] : collect(1:k)
+            x_sub_inner[1:k, s] = x_p_cpu[idx, s]
+            sub_N_inner[s] = Float32(k)
+        end
+        x_sub_inner, sub_N_inner
+    end
+
+    # Build token inputs: [particle_pos; cond_scalars] for each slot
+    x_cond_broad = repeat(reshape(x_cond, f.n_meta - 1, 1, n_samples), 1, n_sub, 1)
+    phi_input = vcat(
+        reshape(x_sub, 1, n_sub, n_samples),
+        x_cond_broad,
+    )  # (n_meta, n_sub, n_samples)
+
+    d = f.output_dim
+    embedded = reshape(f.embedding(reshape(phi_input, f.n_meta, n_sub * n_samples)),
+                       d, n_sub, n_samples)
+
+    h = f.blocks(embedded)          # (d_model, n_sub, n_samples)
+    h = f.output_norm(h)
+
+    # Masked mean-pool over valid particle slots
+    valid  = Float32.(reshape(1:n_sub, n_sub, 1) .<= reshape(sub_N, 1, n_samples))
+    h      = h .* reshape(valid, 1, n_sub, n_samples)
+    pooled = dropdims(sum(h; dims=2); dims=2) ./ max.(sub_N', 1f0)
+    pooled  # (output_dim, n_samples)
+end
+
+# ========================
 # RNNDiagnostic
 # ========================
 
@@ -225,8 +331,16 @@ struct DeepSetFeaturizerHyperParams
     rho_width_exponent::Int
 end
 
+struct AttentionFeaturizerHyperParams
+    n_subsample::Int        # particles to subsample per frame (e.g. 128–512)
+    n_heads_exponent::Int   # n_heads = 2^n_heads_exponent
+    width_exponent::Int     # d_model = 2^width_exponent  (must be ≥ n_heads_exponent)
+    depth::Int              # number of transformer blocks
+end
+
 mutable struct RNNDiagnosticHyperParams
-    featurizer::Union{CNNFeaturizerHyperParams, DeepSetFeaturizerHyperParams}
+    featurizer::Union{CNNFeaturizerHyperParams, DeepSetFeaturizerHyperParams,
+                      AttentionFeaturizerHyperParams}
     rnn_depth::Int
     rnn_width_exponent::Int
     mlp_depth::Int
@@ -255,9 +369,22 @@ function build_featurizer(hp::DeepSetFeaturizerHyperParams; input_dim::Int, n_me
     return DeepSetFeaturizer(; dims_phi=dims_phi, dims_rho=dims_rho, n_meta=n_meta, rng=rng)
 end
 
+function build_featurizer(hp::AttentionFeaturizerHyperParams; input_dim::Int, n_meta::Int=2, rng=Random.GLOBAL_RNG)
+    width_exp = max(hp.width_exponent, hp.n_heads_exponent)  # enforce d_model ≥ n_heads
+    AttentionFeaturizer(;
+        n_meta      = n_meta,
+        d_model     = 2^width_exp,
+        n_heads     = 2^hp.n_heads_exponent,
+        depth       = hp.depth,
+        n_subsample = hp.n_subsample,
+        rng         = rng)
+end
+
 function RNNDiagnostic(hp::RNNDiagnosticHyperParams; input_dim::Int=64, n_meta::Int=1, rng=Random.GLOBAL_RNG)
     featurizer  = build_featurizer(hp.featurizer; input_dim=input_dim, n_meta=n_meta, rng=rng)
-    lstm_n_meta = (featurizer isa DeepSetFeaturizer && featurizer.n_meta > 0) ? 0 : n_meta
+    handles_meta_internally = (featurizer isa DeepSetFeaturizer && featurizer.n_meta > 0) ||
+                              (featurizer isa AttentionFeaturizer && featurizer.n_meta > 0)
+    lstm_n_meta = handles_meta_internally ? 0 : n_meta
     dims_rnn    = fill(2^hp.rnn_width_exponent, hp.rnn_depth)
     dims_mlp    = fill(2^hp.mlp_width_exponent, hp.mlp_depth)
     return RNNDiagnostic(featurizer; dims_rnn=dims_rnn, dims_mlp=dims_mlp, n_meta=lstm_n_meta, rng=rng)
@@ -335,6 +462,16 @@ function load_rnn_from_state(input_dim, state)
             phi_input_dim = size(feat_state.phi.layers[1].weight, 2)
             feat_n_meta   = (phi_input_dim == 1) ? 0 : phi_input_dim
             featurizer = DeepSetFeaturizer(; dims_phi=dims_phi, dims_rho=dims_rho, n_meta=feat_n_meta)
+        elseif haskey(feat_state, :embedding)
+            # AttentionFeaturizer — recover architecture from saved state
+            d_model     = size(feat_state.embedding.weight, 1)
+            n_meta_in   = size(feat_state.embedding.weight, 2)
+            depth       = length(feat_state.blocks.layers)
+            n_heads     = feat_state.blocks.layers[1].attn.nheads
+            n_subsample = feat_state.n_subsample
+            featurizer  = AttentionFeaturizer(;
+                n_meta=n_meta_in, d_model=d_model, n_heads=n_heads,
+                depth=depth, n_subsample=n_subsample)
         else
             error("Unknown featurizer type in saved state")
         end
