@@ -87,7 +87,7 @@ Controlled by `CNNFeaturizerHyperParams(depth, width_exponent)`:
 
 #### `DeepSetFeaturizer`
 
-A permutation-invariant encoder based on Deep Sets (Zaheer et al., 2017), implementing $\rho\!\left(\sum_i \phi(x_i)\right)$ where each $x_i$ is a particle position.
+A permutation-invariant encoder based on Deep Sets [ZKS.al.17]((#refs)), implementing $\rho\!\left(\sum_i \phi(x_i)\right)$ where each $x_i$ is a particle position.
 
 ```julia
 DeepSetFeaturizer(; dims_phi, dims_rho, rng)
@@ -170,7 +170,7 @@ reset_rnn_state!(online)  # reset hidden state for next trajectory
 julia --project=. tests/runtests.jl
 ```
 
-### 5. Hyperparameter optimisation
+### 5. Hyperparameter optimization
 
 Two automated search strategies are provided in `hyperparameter_tuning/`. Both operate on a pre-generated **offline dataset** of FV trajectories, avoiding repeated simulation cost during the search.
 
@@ -182,8 +182,9 @@ julia --project=. hyperparameter_tuning/make_dataset.jl
 
 Writes `hyperparameter_tuning/hp_dataset.jld2` containing `train` and `test` splits used by both search scripts.
 
-#### Bayesian optimisation (`tune_bo.jl`)
+#### Bayesian optimization (`tune_bo.jl`)
 
+Runs Bayesian optimization based [F18]((#refs)) hyperparameter search.
 Fits a GP surrogate (SE-ARD kernel, MAP hyperparameters) and selects candidates via Upper-Confidence-Bound acquisition. Each candidate is trained for a fixed number of epochs before its test loss is recorded. Runs a 7-dimensional CNN search (50 iterations) and a 9-dimensional DeepSet search (60 iterations) sequentially.
 
 ```bash
@@ -200,8 +201,9 @@ Output files written to `hyperparameter_tuning/`:
 | `best_hope_bo_ds.jld2` | Best DeepSet model state after retraining on online data |
 | `best_hope_bo.jld2` | Overall winner (CNN or DeepSet) |
 
-#### Freeze-Thaw Bayesian optimisation (`tune_ftbo.jl`)
+#### Freeze-thaw Bayesian optimization (`tune_ftbo.jl`)
 
+Runs freeze-thaw Bayesian optimization [SSA14]((#refs)).
 Maintains a pool of partially-trained configs and allocates training budget adaptively: promising configs get more epochs while clearly poor ones are abandoned early. Uses a product GP kernel (SE-ARD over hyperparameters × Freeze-Thaw over training time).
 
 ```bash
@@ -278,4 +280,6 @@ Setting `stride_lims=(a,b)` with `a < b` trains the model to be robust to variab
 - V98: [A. F. Voter, *Parallel Replica method for dynamics of infrequent events*, Physical Review B, 1998](https://journals.aps.org/prb/abstract/10.1103/PhysRevB.57.R13985)
 - BLS15: [A. Binder, T. Lelièvre, G. Simpson, *A generalized parallel replica dynamics*, Journal of Computational Physics, 2015](https://www.sciencedirect.com/science/article/pii/S0021999115000030)
 - BLS25: [N. Blassel, T. Lelièvre, G. Stoltz, *Quantitative spectral asymptotics for reversible diffusions in temperature-dependent domains*, arXiv preprint, 2025](https://arxiv.org/abs/2501.16082)
-- Zaheer et al., 2017: [M. Zaheer, S. Kottur, S. Ravanbakhsh, B. Póczos, R. R. Salakhutdinov, A. J. Smola, *Deep Sets*, NeurIPS 2017](https://arxiv.org/abs/1703.06114)
+- ZKS.al.17: [M. Zaheer, S. Kottur, S. Ravanbakhsh, B. Póczos, R. R. Salakhutdinov, A. J. Smola, *Deep Sets*, NeurIPS 2017](https://arxiv.org/abs/1703.06114)
+- F18: [P.I. Frazier, "A tutorial on Bayesian optimization", arXiv preprint, 2018](https://arxiv.org/abs/1807.02811)
+- SSA14: [K. Swersky, J. Snoek, R.P. Adams, "Freeze-thaw Bayesian optimization", arXiv preprint, 2014](https://arxiv.org/abs/1406.3896)
