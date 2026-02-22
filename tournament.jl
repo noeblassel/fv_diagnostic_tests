@@ -34,7 +34,8 @@ function build_candidate_run(hyp;
         cut_per_trace=cut_per_trace,
         id="$(tstamp)_$(hash(hyp))_$(base_seed)",
         stride_lims=stride_lims,
-        Nreplicas_lims=Nreplicas_lims
+        Nreplicas_lims=Nreplicas_lims,
+        n_meta=n_meta
     )
 end
 

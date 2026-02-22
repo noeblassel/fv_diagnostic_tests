@@ -11,7 +11,7 @@ const OFFLINE_MINIBATCH_SIZE = 32    # trajectories per minibatch
 
 # Assemble one (X, Y, mask) from the trajectories at `indices`.
 # Returns `nothing` if all trajectories are too short.
-function _assemble_batch(dataset, indices, rng; feature, input_dim, min_length=5)
+function _assemble_batch(dataset, indices, rng; feature, input_dim, n_meta::Int=1, min_length=5)
     dt           = dataset.dt
     batch        = Vector{Vector{Float32}}[]
     labels_batch = Vector{Float32}[]
@@ -22,8 +22,14 @@ function _assemble_batch(dataset, indices, rng; feature, input_dim, min_length=5
         l = length(fv_frames_k)
         l < min_length && continue
 
-        meta_val = Float32(sqrt(dataset.Nreplicas[k] * dataset.strides[k] * dt))
-        features = [vcat(feature(f, input_dim), [meta_val]) for f in fv_frames_k]
+        if n_meta == 2
+            N_actual  = dataset.Nreplicas[k] * dataset.strides[k]
+            meta_vals = Float32.([N_actual, sqrt(N_actual * dt)])
+            features  = [vcat(feature(f, input_dim), meta_vals) for f in fv_frames_k]
+        else
+            meta_val = Float32(sqrt(dataset.Nreplicas[k] * dataset.strides[k] * dt))
+            features = [vcat(feature(f, input_dim), [meta_val]) for f in fv_frames_k]
+        end
 
         α   = (min_length / l) + rand(rng) * (1.0 - min_length / l)
         len = clamp(round(Int, α * l), min_length, l)
@@ -33,7 +39,7 @@ function _assemble_batch(dataset, indices, rng; feature, input_dim, min_length=5
 
     isempty(batch) && return nothing
 
-    batch_X = MLUtils.batchseq(batch,        zeros(Float32, input_dim + 1))
+    batch_X = MLUtils.batchseq(batch,        zeros(Float32, input_dim + n_meta))
     batch_Y = MLUtils.batchseq(labels_batch, _OFFLINE_DUMMY)
     Y       = stack(batch_Y, dims=1)
     return stack(batch_X, dims=2), Y, (Y .!= _OFFLINE_DUMMY)
@@ -48,10 +54,10 @@ Assembles **all** trajectories in `dataset` into a single batch (useful for
 inspection / smoke-tests).  One random start-anchored cut per trajectory;
 appends `sqrt(N·stride·dt)` metadata scalar to every frame.
 """
-function epoch_batch(dataset, rng; feature=hist_feature, input_dim=64, min_length=5)
+function epoch_batch(dataset, rng; feature=hist_feature, input_dim=64, n_meta::Int=1, min_length=5)
     perm   = randperm(rng, length(dataset.sequences))
     result = _assemble_batch(dataset, perm, rng;
-                             feature=feature, input_dim=input_dim, min_length=min_length)
+                             feature=feature, input_dim=input_dim, n_meta=n_meta, min_length=min_length)
     result === nothing && error("epoch_batch: no valid trajectories")
     return result
 end
@@ -71,7 +77,8 @@ function run_epoch_offline!(params::TrainingRun, dataset;
 
     @showprogress for chunk in Iterators.partition(perm, minibatch_size)
         mb = _assemble_batch(dataset, chunk, params.rng;
-                             feature=params.feature, input_dim=params.input_dim)
+                             feature=params.feature, input_dim=params.input_dim,
+                             n_meta=params.n_meta)
         mb === nothing && continue
         X, Y, mask = mb
 
@@ -102,7 +109,8 @@ function test_loss_offline!(params::TrainingRun, dataset;
 
     @showprogress for chunk in Iterators.partition(perm, minibatch_size)
         mb = _assemble_batch(dataset, chunk, params.rng;
-                             feature=params.feature, input_dim=params.input_dim)
+                             feature=params.feature, input_dim=params.input_dim,
+                             n_meta=params.n_meta)
         mb === nothing && continue
         X, Y, mask = mb
         logits = params.model(X)

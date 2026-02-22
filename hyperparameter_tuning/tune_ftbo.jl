@@ -457,7 +457,8 @@ function make_build_run_ds()
             cut_per_trace  = CUT_PER_TRACE,
             feature        = deep_set_feature,
             stride_lims    = STRIDE_LIMS,
-            Nreplicas_lims = NREPLICAS_LIMS)
+            Nreplicas_lims = NREPLICAS_LIMS,
+            n_meta         = 2)
     end
     return build_run
 end

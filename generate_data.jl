@@ -307,20 +307,16 @@ function tecdf_feature(pts,dim_feature)
 end
 
 """
-Deep Sets feature representation — returns particle positions resampled to exactly Nmax.
+Deep Sets feature representation — returns particle positions zero-padded to exactly Nmax.
 
-If the ensemble has more than Nmax particles, subsample without replacement.
-If fewer, resample with replacement (bootstrap).
+Fills the first min(N, Nmax) entries with the actual positions; remaining slots are zero.
+No resampling is performed; the caller is responsible for setting input_dim = Nreplicas_max × stride_max.
 """
-function deep_set_feature(pts, Nmax; rng=Random.default_rng())
+function deep_set_feature(pts, Nmax)
     N = length(pts)
-    if N == Nmax
-        return Float32.(pts)
-    elseif N > Nmax
-        return Float32.(sample(rng, pts, Nmax; replace=false))
-    else
-        return Float32.(sample(rng, pts, Nmax; replace=true))
-    end
+    out = zeros(Float32, Nmax)
+    out[1:min(N, Nmax)] .= Float32.(pts[1:min(N, Nmax)])
+    return out
 end
 
 """
@@ -345,8 +341,14 @@ into a batch suitable for machine learning or statistical modeling.
   controls ONLY sampling frequency, not ground-truth accuracy.
 - `Nreplicas_lims::Tuple{Int,Int}=(50,50)`: range of replica counts to sample per trace.
 - `input_dim::Int=64`: dimensionality of feature vectors (e.g., histogram bins).
+  For `deep_set_feature`, set `input_dim = Nreplicas_lims[2] × stride_lims[2]` (maximum
+  particle slots × stride) so the padded raw-position vector fits without truncation.
 - `feature::Function=hist_feature`: feature extraction function; one of
-  `hist_feature`, `ecdf_feature`, or `tecdf_feature`.
+  `hist_feature`, `ecdf_feature`, `tecdf_feature`, or `deep_set_feature`.
+- `n_meta::Int=1`: number of metadata scalars appended to each frame vector.
+  - `n_meta=1` (default): appends `√(N·τ)` — legacy behaviour for CNN/histogram models.
+  - `n_meta=3`: appends `[N_actual, Nreplicas, τ]` — use with `deep_set_feature` and the
+    new `DeepSetFeaturizer(n_meta=3)` that performs masked mean-pooling instead of resampling.
 - `ntrace::Int=5`: number of independent Fleming–Viot traces per potential.
 - `ncut::Int=1`: number of random subsequences extracted from each trace.
 - `npot::Int=5`: number of distinct random potentials to generate.
@@ -356,7 +358,7 @@ into a batch suitable for machine learning or statistical modeling.
 
 # Returns
 A tuple `(X, Y, mask)` where:
-- `X` is a 3D tensor `(input_dim + 1, max_length, batch_size)` of feature sequences (the +1 is a `sqrt(N·τ)` metadata scalar).
+- `X` is a 3D tensor `(input_dim + n_meta, max_length, batch_size)` of feature sequences.
 - `Y` is a 2D tensor `(max_length, batch_size)` of binary labels indicating decorrelation.
 - `mask` is a boolean matrix of the same shape as `Y`, where `true` marks valid entries.
 
@@ -377,6 +379,7 @@ function get_batch(rng;
     Nreplicas_lims::Tuple{Int,Int}=(50,50),
     input_dim=64,
     feature::Function=hist_feature,
+    n_meta::Int=1,
     ntrace=5,
     ncut=1,
     npot=5,
@@ -495,9 +498,15 @@ function get_batch(rng;
                     end
                 end
 
-                # Append sqrt(N·τ) calibration scalar to every frame
-                meta_val = Float32(sqrt(Nreplicas * stride * dt))
-                features = [vcat(f, [meta_val]) for f in features]
+                # Append metadata scalars to every frame
+                if n_meta == 2
+                    N_actual  = Nreplicas * stride
+                    meta_vals = Float32.([N_actual, sqrt(N_actual * dt)])
+                    features  = [vcat(f, meta_vals) for f in features]
+                else   # n_meta == 1 — legacy single scalar, backward-compatible
+                    meta_val = Float32(sqrt(Nreplicas * stride * dt))
+                    features = [vcat(f, [meta_val]) for f in features]
+                end
 
                 full_labels = (1:l) .* (stride * dt) .> T_conv
 
@@ -531,7 +540,7 @@ function get_batch(rng;
     end
     p = randperm(rng, nsamples)
 
-    batch_X = batchseq(view(batch, p), zeros(Float32, input_dim + 1))
+    batch_X = batchseq(view(batch, p), zeros(Float32, input_dim + n_meta))
     batch_Y = batchseq(view(labels, p), dummy_val)
 
     Y = stack(batch_Y,dims=1)

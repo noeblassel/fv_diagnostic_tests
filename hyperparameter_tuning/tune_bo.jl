@@ -193,7 +193,8 @@ function make_objective(;
         feature,
         featurizer_builder,
         stride_lims    = STRIDE_LIMS,
-        Nreplicas_lims = NREPLICAS_LIMS)
+        Nreplicas_lims = NREPLICAS_LIMS,
+        n_meta::Int    = 1)
 
     history    = NamedTuple[]
     call_count = Ref(0)
@@ -220,7 +221,8 @@ function make_objective(;
             cut_per_trace  = cut_per_trace,
             feature        = feature,
             stride_lims    = stride_lims,
-            Nreplicas_lims = Nreplicas_lims)
+            Nreplicas_lims = Nreplicas_lims,
+            n_meta         = n_meta)
 
         println("  model: $(repr("text/plain",run.model))")
 
@@ -293,7 +295,8 @@ obj_ds, hist_ds = make_objective(;
     feature            = deep_set_feature,
     featurizer_builder = ds_builder,
     stride_lims        = STRIDE_LIMS,
-    Nreplicas_lims     = NREPLICAS_LIMS)
+    Nreplicas_lims     = NREPLICAS_LIMS,
+    n_meta             = 2)
 
 cnn_config_key(x) = (round(x[1]; digits=1),
                      round(Int,x[2]), round(Int,x[3]),
@@ -444,7 +447,8 @@ best_run_ds = build_candidate_run((lr_ds, h_ds);
     cut_per_trace  = CUT_PER_TRACE,
     feature        = deep_set_feature,
     stride_lims    = STRIDE_LIMS,
-    Nreplicas_lims = NREPLICAS_LIMS)
+    Nreplicas_lims = NREPLICAS_LIMS,
+    n_meta         = 2)
 
 run_epoch_offline!(best_run_ds, HP_TRAIN)
 retrain_result_ds = test_loss_offline!(best_run_ds, HP_TEST)
