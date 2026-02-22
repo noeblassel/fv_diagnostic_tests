@@ -40,6 +40,7 @@ for gamma=[1,2,5,10,20]
 
             plot!(pl,times,mean(rnn_ϕ,dims=2),ribbon=std(rnn_ϕ,dims=2)/sqrt(J),color=:red,label="",linestyle=:dot)
             plot!(pl,times,mean(rnn_ψ,dims=2),ribbon=std(rnn_ψ,dims=2)/sqrt(J),color=:blue,label="",linestyle=:dot)
+            ylims!(pl,0,1.0)
 
             savefig(pl,joinpath("figures_diala","diagnostics_$(saddle_ix)_$(domain)_$(gamma).pdf"))
 
@@ -56,6 +57,7 @@ const ALPHAS_GR  = [0.2, 0.1, 0.05,0.02, 0.01]
 const DOMAIN = "basin"
 const DATADIR = "results_diala"
 const TV_THRESHOLD = 0.05
+const MIN_BURNIN = 0.5 # picoseconds (ignores convergence signals before this time)
 
 # --- Color Logic ---
 
@@ -139,14 +141,23 @@ function process_file(filepath, alphas, method)
     tv_ϕ, tv_ψ = d["tv_ϕ"], d["tv_ψ"]
     
     # Ground Truth Time
-    ix_true_ϕ = findfirst(x -> x < TV_THRESHOLD, tv_ϕ)
-    ix_true_ψ = findfirst(x -> x < TV_THRESHOLD, tv_ψ)
+    start_idx = findfirst(t -> t >= MIN_BURNIN, times)
+    if isnothing(start_idx)
+        start_idx = 1 # Fallback if times < burnin
+    end
+    
+    # Ground Truth Time
+    # Modified to use findnext starting from start_idx to avoid initial false positives
+    ix_true_ϕ = findnext(x -> x < TV_THRESHOLD, tv_ϕ, start_idx)
+    ix_true_ψ = findnext(x -> x < TV_THRESHOLD, tv_ψ, start_idx)
     
     if isnothing(ix_true_ϕ) || isnothing(ix_true_ψ)
         t_true = times[end]
     else
         t_true = times[max(ix_true_ϕ, ix_true_ψ)]
     end
+
+    
 
     if method == :RNN
         data_ϕ, data_ψ = d["rnn_ϕ"], d["rnn_ψ"]
@@ -170,8 +181,8 @@ function process_file(filepath, alphas, method)
             col_ϕ = data_ϕ[:, i]
             col_ψ = data_ψ[:, i]
             
-            ix_ϕ = findfirst(x -> comp(x, α), col_ϕ)
-            ix_ψ = findfirst(x -> comp(x, α), col_ψ)
+            ix_ϕ = findnext(x -> comp(x, α), col_ϕ, start_idx)
+            ix_ψ = findnext(x -> comp(x, α), col_ψ, start_idx)
             
             if !isnothing(ix_ϕ) && !isnothing(ix_ψ)
                 # Success case
@@ -188,7 +199,7 @@ function process_file(filepath, alphas, method)
             res_time[α] = (mean(t_ratios), std(t_ratios))
             res_err[α]  = (mean(errors), std(errors))
         else
-            res_time[α] = (NaN, NaN)
+            res_time[α] = (last(times)/t_true, NaN)
             res_err[α]  = (NaN, NaN)
         end
         res_prob[α] = p_success
@@ -258,7 +269,11 @@ function generate_html_table(metrics_time, metrics_err, metrics_prob, alphas, ti
                     # - Reduced padding
                     print(io, "<td style='padding:2px 5px; text-align:center; white-space: nowrap;'>")
                     if p_success == 0.0
-                        print(io, "ncv")
+                        if type_metric == :time
+                            @printf(io, "ncv (> %.2f)",val_mean)
+                        else
+                            print(io, "ncv")
+                        end
                     else
                         if p_success == 1.0
                             @printf(io, "%.2f ± %.2f", val_mean, val_std)

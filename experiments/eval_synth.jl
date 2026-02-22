@@ -202,7 +202,7 @@ function eval_metrics(model;
     return results
 end
 
-time_bins = 0.0:0.05:3.0
+time_bins = 0.0:0.05:2.0
 bin_centers = (time_bins[1:end-1] .+ time_bins[2:end]) ./ 2
 
 num_chunks = 1000
@@ -213,7 +213,7 @@ results = eval_metrics(model;
     num_samples=num_chunks,
     npot_per_chunk=5,
     ntrace=5,
-    ncut=10,
+    ncut=0,
     time_bins=time_bins,
     thr_vals=thr_values,
     rng=rng
@@ -261,10 +261,6 @@ plot!([1.0;results.ic_roc_fpr[2];0.0],
       [1.0;results.ic_roc_tpr[2];0.0],
       linestyle=:dash, color=:blue, label="")
 savefig("roc_curve.pdf")
-
-println(size(thr_values))
-println(size(bin_centers))
-println(results.acc_time)
 
 heatmap(thr_values,bin_centers,results.acc_time,xlabel=L"\alpha",ylabel=L"t/t_{\mathrm{corr}}")
 hline!([1.0], linestyle=:dash, color=:blue, label=L"t = t_{\mathrm{corr}}")
