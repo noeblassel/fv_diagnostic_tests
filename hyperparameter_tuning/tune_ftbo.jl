@@ -336,13 +336,13 @@ function freeze_thaw_bo_search(build_run, lb, ub;
             println("  [FTBO] iter $iter/$n_iter  THAW config $chosen_pool_idx" *
                     " (chunk $t_next/$T_final)" *
                     "  loss=$(round(loss; digits=4))" *
-                    "  best=$(round(best_observed(); digits=4))" *
+                    "  best=$(round(minimum(minimum(cfg.losses) for cfg in pool); digits=4))" *
                      "  model: $(repr("text/plain",cfg.run.model))")
         else
             loss = launch_config!(chosen_x_new)
             println("  [FTBO] iter $iter/$n_iter  NEW config #$(length(pool))" *
                     "  loss=$(round(loss; digits=4))" *
-                    "  best=$(round(best_observed(); digits=4))")
+                    "  best=$(round(minimum(minimum(cfg.losses) for cfg in pool); digits=4))")
         end
         flush(stdout)
 

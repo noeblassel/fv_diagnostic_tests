@@ -423,8 +423,10 @@ best_run_cnn = build_candidate_run((lr_cnn, h_cnn);
     stride_lims    = STRIDE_LIMS,
     Nreplicas_lims = NREPLICAS_LIMS)
 
-run_epoch!(best_run_cnn, TRAIN_BATCHES, false)
-acc_cnn, loss_cnn = test_accuracy!(best_run_cnn, TEST_BATCHES)
+run_epoch_offline!(best_run_cnn, HP_TRAIN)
+retrain_result_cnn = test_loss_offline!(best_run_cnn, HP_TEST)
+loss_cnn = retrain_result_cnn.loss
+acc_cnn  = retrain_result_cnn.acc
 println("CNN retrain: val_loss=$(loss_cnn)  acc=$(acc_cnn)")
 JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo_cnn.jld2"), model_state=Flux.state(best_run_cnn.model))
 println("Saved → $(joinpath(@__DIR__, "best_hope_bo_cnn.jld2"))")
@@ -444,8 +446,10 @@ best_run_ds = build_candidate_run((lr_ds, h_ds);
     stride_lims    = STRIDE_LIMS,
     Nreplicas_lims = NREPLICAS_LIMS)
 
-run_epoch!(best_run_ds, TRAIN_BATCHES, false)
-acc_ds, loss_ds = test_accuracy!(best_run_ds, TEST_BATCHES)
+run_epoch_offline!(best_run_ds, HP_TRAIN)
+retrain_result_ds = test_loss_offline!(best_run_ds, HP_TEST)
+loss_ds = retrain_result_ds.loss
+acc_ds  = retrain_result_ds.acc
 println("DeepSet retrain: val_loss=$(loss_ds)  acc=$(acc_ds)")
 JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo_ds.jld2"), model_state=Flux.state(best_run_ds.model))
 println("Saved → $(joinpath(@__DIR__, "best_hope_bo_ds.jld2"))")
