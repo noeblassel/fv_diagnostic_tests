@@ -9,6 +9,7 @@ using .FVDiagnosticTests
 using Flux,JLD2
 
 lrs = [1e-3]
+input_dim_exponent_range = 5:7   # 32, 64, or 128 histogram bins
 cnn_depth_range = 3:5
 cnn_width_exponent_range = 3:4
 rnn_depth_range = 1:2
@@ -17,8 +18,8 @@ mlp_depth_range = 1:2
 mlp_width_exponent_range = 5:6
 
 
-candidates = [build_candidate_run((lr, RNNDiagnosticHyperParams(cd, cw, rd, rw, md, mw)); base_seed=2022)
- for lr in lrs for cd in cnn_depth_range for cw in cnn_width_exponent_range
+candidates = [build_candidate_run((lr, RNNDiagnosticHyperParams(CNNFeaturizerHyperParams(ide, cd, cw), rd, rw, md, mw)); base_seed=2022)
+ for lr in lrs for ide in input_dim_exponent_range for cd in cnn_depth_range for cw in cnn_width_exponent_range
                for rd in rnn_depth_range for rw in rnn_width_exponent_range for md in mlp_depth_range
                for mw in mlp_width_exponent_range]
 

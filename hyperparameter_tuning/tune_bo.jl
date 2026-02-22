@@ -176,7 +176,7 @@ end
 # ============================================================
 
 """
-    make_objective(; base_seed, input_dim, βlims, ...)
+    make_objective(; base_seed, βlims, ...)
 
 Returns a closure `x -> -loss` that wraps one training epoch using offline data.
 The first 5 dims of `x` are shared (lr, rnn/mlp depths & widths);
@@ -184,7 +184,6 @@ The first 5 dims of `x` are shared (lr, rnn/mlp depths & widths);
 """
 function make_objective(;
         base_seed,
-        input_dim,
         βlims,
         train_epochs,
         pot_per_batch,
@@ -214,7 +213,6 @@ function make_objective(;
 
         run = build_candidate_run((lr, h);
             base_seed      = base_seed + call_count[],
-            input_dim      = input_dim,
             βlims          = βlims,
             pot_per_batch  = pot_per_batch,
             trace_per_pot  = trace_per_pot,
@@ -261,8 +259,6 @@ end
 # ============================================================
 
 const BASE_SEED       = 2022
-const INPUT_DIM_CNN   = 64
-const INPUT_DIM_DS    = 200    # max particles for DeepSet
 const BETA_LIMS       = (1.0, 3.0)
 const TRAIN_EPOCHS    = 10     # epochs per BO candidate evaluation
 const POT_PER_BATCH   = 5
@@ -272,63 +268,7 @@ const STRIDE_LIMS     = (10, 200)
 const NREPLICAS_LIMS  = (10, 200)
 
 # ============================================================
-# DeepSet BO search (9-dimensional)
-# ============================================================
-# x[1–5]: same as CNN
-# x[6]: phi_depth       [0.5, 3.5]  → 1, 2, or 3
-# x[7]: phi_width_exp   [2.5, 6.5]  → 3, 4, 5, or 6  (narrowed for 1-D input)
-# x[8]: rho_depth       [0.5, 3.5]  → 1, 2, or 3
-# x[9]: rho_width_exp   [2.5, 6.5]  → 3, 4, 5, or 6  (narrowed for 1-D input)
-
-ds_builder(x) = (DeepSetFeaturizerHyperParams(
-    round(Int, x[6]), round(Int, x[7]),
-    round(Int, x[8]), round(Int, x[9])), 4)
-
-obj_ds, hist_ds = make_objective(;
-    base_seed          = BASE_SEED,
-    input_dim          = INPUT_DIM_DS,
-    βlims              = BETA_LIMS,
-    train_epochs       = TRAIN_EPOCHS,
-    pot_per_batch      = POT_PER_BATCH,
-    trace_per_pot      = TRACE_PER_POT,
-    cut_per_trace      = CUT_PER_TRACE,
-    feature            = deep_set_feature,
-    featurizer_builder = ds_builder,
-    stride_lims        = STRIDE_LIMS,
-    Nreplicas_lims     = NREPLICAS_LIMS,
-    n_meta             = 2)
-
-cnn_config_key(x) = (round(x[1]; digits=1),
-                     round(Int,x[2]), round(Int,x[3]),
-                     round(Int,x[4]), round(Int,x[5]),
-                     round(Int,x[6]), round(Int,x[7]))
-ds_config_key(x)  = (round(x[1]; digits=1),
-                     round(Int,x[2]), round(Int,x[3]),
-                     round(Int,x[4]), round(Int,x[5]),
-                     round(Int,x[6]), round(Int,x[7]),
-                     round(Int,x[8]), round(Int,x[9]))
-
-println("\n=== DeepSet Bayesian Optimisation (9 dims, 60 iterations) ===")
-
-result_ds = bo_search(obj_ds,
-    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 0.5, 2.5, 0.5, 2.5],
-    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 3.5, 6.5, 3.5, 6.5];
-    n_init     = 5,
-    n_iter     = 55,
-    config_key = ds_config_key,
-    rng        = Xoshiro(BASE_SEED + 1))
-
-JLD2.jldsave(joinpath(@__DIR__, "bo_results_ds.jld2");
-    X         = result_ds.X,
-    y         = result_ds.y,
-    best_x    = result_ds.observed_optimizer,
-    best_loss = -result_ds.observed_optimum,
-    history   = hist_ds,
-)
-println("Saved → $(joinpath(@__DIR__, "bo_results_ds.jld2"))")
-
-    # ============================================================
-# CNN BO search (7-dimensional)
+# CNN BO search (8-dimensional)
 # ============================================================
 # x[1]: log(lr)         [log(1e-4), log(1e-2)]
 # x[2]: rnn_depth       [0.5, 2.5]  → 1 or 2
@@ -337,12 +277,12 @@ println("Saved → $(joinpath(@__DIR__, "bo_results_ds.jld2"))")
 # x[5]: mlp_width_exp   [4.5, 6.5]  → 5 or 6
 # x[6]: cnn_depth       [2.5, 5.5]  → 3, 4, or 5
 # x[7]: cnn_width_exp   [2.5, 4.5]  → 3 or 4
+# x[8]: input_dim_exp   [4.5, 8.5]  → 5, 6, 7, or 8  (32, 64, 128, or 256 bins)
 
-cnn_builder(x) = (CNNFeaturizerHyperParams(round(Int, x[6]), round(Int, x[7])), 2)
+cnn_builder(x) = (CNNFeaturizerHyperParams(round(Int, x[8]), round(Int, x[6]), round(Int, x[7])), 2)
 
 obj_cnn, hist_cnn = make_objective(;
     base_seed          = BASE_SEED,
-    input_dim          = INPUT_DIM_CNN,
     βlims              = BETA_LIMS,
     train_epochs       = TRAIN_EPOCHS,
     pot_per_batch      = POT_PER_BATCH,
@@ -353,11 +293,17 @@ obj_cnn, hist_cnn = make_objective(;
     stride_lims        = STRIDE_LIMS,
     Nreplicas_lims     = NREPLICAS_LIMS)
 
-println("\n=== CNN Bayesian Optimisation (7 dims, 50 iterations) ===")
+cnn_config_key(x) = (round(x[1]; digits=1),
+                     round(Int,x[2]), round(Int,x[3]),
+                     round(Int,x[4]), round(Int,x[5]),
+                     round(Int,x[6]), round(Int,x[7]),
+                     round(Int,x[8]))
+
+println("\n=== CNN Bayesian Optimisation (8 dims, 50 iterations) ===")
 
 result_cnn = bo_search(obj_cnn,
-    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5],
-    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5];
+    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5, 4.5],
+    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5, 8.5];
     n_init     = 5,
     n_iter     = 45,
     config_key = cnn_config_key,
@@ -377,31 +323,15 @@ println("Saved → $(joinpath(@__DIR__, "bo_results_cnn.jld2"))")
 # ============================================================
 
 function decode_cnn(x)
-    lr            = exp(x[1])
-    rnn_depth     = round(Int, x[2])
-    rnn_width_exp = round(Int, x[3])
-    mlp_depth     = round(Int, x[4])
-    mlp_width_exp = round(Int, x[5])
-    cnn_depth     = round(Int, x[6])
-    cnn_width_exp = round(Int, x[7])
-    feat_hp = CNNFeaturizerHyperParams(cnn_depth, cnn_width_exp)
-    h = RNNDiagnosticHyperParams(feat_hp, rnn_depth, rnn_width_exp,
-                                  mlp_depth, mlp_width_exp)
-    return lr, h
-end
-
-function decode_ds(x)
-    lr            = exp(x[1])
-    rnn_depth     = round(Int, x[2])
-    rnn_width_exp = round(Int, x[3])
-    mlp_depth     = round(Int, x[4])
-    mlp_width_exp = round(Int, x[5])
-    phi_depth     = round(Int, x[6])
-    phi_width_exp = round(Int, x[7])
-    rho_depth     = round(Int, x[8])
-    rho_width_exp = round(Int, x[9])
-    feat_hp = DeepSetFeaturizerHyperParams(phi_depth, phi_width_exp,
-                                            rho_depth, rho_width_exp)
+    lr              = exp(x[1])
+    rnn_depth       = round(Int, x[2])
+    rnn_width_exp   = round(Int, x[3])
+    mlp_depth       = round(Int, x[4])
+    mlp_width_exp   = round(Int, x[5])
+    cnn_depth       = round(Int, x[6])
+    cnn_width_exp   = round(Int, x[7])
+    input_dim_exp   = round(Int, x[8])
+    feat_hp = CNNFeaturizerHyperParams(input_dim_exp, cnn_depth, cnn_width_exp)
     h = RNNDiagnosticHyperParams(feat_hp, rnn_depth, rnn_width_exp,
                                   mlp_depth, mlp_width_exp)
     return lr, h
@@ -417,7 +347,6 @@ println("lr=$(lr_cnn)  hyperparams=$(h_cnn)")
 
 best_run_cnn = build_candidate_run((lr_cnn, h_cnn);
     base_seed      = BASE_SEED,
-    input_dim      = INPUT_DIM_CNN,
     βlims          = BETA_LIMS,
     pot_per_batch  = POT_PER_BATCH,
     trace_per_pot  = TRACE_PER_POT,
@@ -434,36 +363,5 @@ println("CNN retrain: val_loss=$(loss_cnn)  acc=$(acc_cnn)")
 JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo_cnn.jld2"), model_state=Flux.state(best_run_cnn.model))
 println("Saved → $(joinpath(@__DIR__, "best_hope_bo_cnn.jld2"))")
 
-println("\n=== Retraining best DeepSet config ===")
-lr_ds, h_ds = decode_ds(result_ds.observed_optimizer)
-println("lr=$(lr_ds)  hyperparams=$(h_ds)")
-
-best_run_ds = build_candidate_run((lr_ds, h_ds);
-    base_seed      = BASE_SEED,
-    input_dim      = INPUT_DIM_DS,
-    βlims          = BETA_LIMS,
-    pot_per_batch  = POT_PER_BATCH,
-    trace_per_pot  = TRACE_PER_POT,
-    cut_per_trace  = CUT_PER_TRACE,
-    feature        = deep_set_feature,
-    stride_lims    = STRIDE_LIMS,
-    Nreplicas_lims = NREPLICAS_LIMS,
-    n_meta         = 2)
-
-run_epoch_offline!(best_run_ds, HP_TRAIN)
-retrain_result_ds = test_loss_offline!(best_run_ds, HP_TEST)
-loss_ds = retrain_result_ds.loss
-acc_ds  = retrain_result_ds.acc
-println("DeepSet retrain: val_loss=$(loss_ds)  acc=$(acc_ds)")
-JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo_ds.jld2"), model_state=Flux.state(best_run_ds.model))
-println("Saved → $(joinpath(@__DIR__, "best_hope_bo_ds.jld2"))")
-
-# ── Overall winner ───────────────────────────────────────────
-if loss_cnn <= loss_ds
-    println("\nOverall winner: CNN (loss=$(loss_cnn))")
-    JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo.jld2"), model_state=Flux.state(best_run_cnn.model))
-else
-    println("\nOverall winner: DeepSet (loss=$(loss_ds))")
-    JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo.jld2"), model_state=Flux.state(best_run_ds.model))
-end
+JLD2.jldsave(joinpath(@__DIR__, "best_hope_bo.jld2"), model_state=Flux.state(best_run_cnn.model))
 println("Saved → $(joinpath(@__DIR__, "best_hope_bo.jld2"))")

@@ -39,94 +39,6 @@ function (f::CNNFeaturizer)(x)
 end
 
 # ========================
-# Deep Sets Featurizer
-# ========================
-
-struct DeepSetFeaturizer{S<:Chain, T<:Chain} <: AbstractFeaturizer
-    phi::S        # element-wise MLP: R^n_meta → R^d  (applied to each particle)
-    rho::T        # aggregation MLP: R^d → R^e  (applied after mean pooling)
-    output_dim::Int
-    n_meta::Int   # 0 → original 1-D input; ≥1 → meta[1] is mask, meta[2:end] condition φ
-end
-
-Flux.@layer DeepSetFeaturizer
-
-function DeepSetFeaturizer(; input_dim=nothing, dims_phi::Vector{Int}, dims_rho::Vector{Int}, n_meta::Int=0, rng=Random.GLOBAL_RNG)
-    initializer = Flux.glorot_uniform(rng)
-
-    # phi: Dense(max(1,n_meta) → dims_phi[1], leakyrelu) → ... → Dense(→ dims_phi[end], leakyrelu)
-    # When n_meta==0: φ takes 1 particle coordinate (original behaviour)
-    # When n_meta≥1: φ takes [xᵢ; meta[2:end]] = n_meta inputs
-    phi_layers = []
-    in_dim = max(1, n_meta)
-    for out_dim in dims_phi
-        push!(phi_layers, Dense(in_dim => out_dim, leakyrelu, init=initializer))
-        in_dim = out_dim
-    end
-    phi = Chain(phi_layers...)
-
-    # rho: Dense(dims_phi[end] → dims_rho[1], leakyrelu) → ... → Dense(→ dims_rho[end])
-    # All layers have leakyrelu except the last (linear output)
-    rho_layers = []
-    in_dim = last(dims_phi)
-    for (i, out_dim) in enumerate(dims_rho)
-        if i < length(dims_rho)
-            push!(rho_layers, Dense(in_dim => out_dim, leakyrelu, init=initializer))
-        else
-            push!(rho_layers, Dense(in_dim => out_dim, init=initializer))
-        end
-        in_dim = out_dim
-    end
-    rho = Chain(rho_layers...)
-
-    return DeepSetFeaturizer(phi, rho, last(dims_rho), n_meta)
-end
-
-function (f::DeepSetFeaturizer)(x)
-    if f.n_meta == 0
-        # Original path: x is (Nmax, 1, n_samples) — Nmax particle positions per sample
-        Nmax, _, n_samples = size(x)
-        x_flat = reshape(x, 1, Nmax * n_samples)
-        phi_out = f.phi(x_flat)                                    # (d, Nmax * n_samples)
-        d = size(phi_out, 1)
-        phi_out = reshape(phi_out, d, Nmax, n_samples)
-        aggregated = dropdims(mean(phi_out; dims=2); dims=2)        # (d, n_samples)
-        return f.rho(aggregated)                                    # (output_dim, n_samples)
-    else
-        # Metadata path: x is (Nmax + n_meta, 1, n_samples)
-        # meta[1] = N_actual (mask), meta[2:end] = conditioning scalars broadcast to φ
-        total_dim, _, n_samples = size(x)
-        Nmax = total_dim - f.n_meta
-
-        x_p = x[1:Nmax, 1, :]                                     # (Nmax, n_samples) — padded positions
-        x_m = x[(Nmax+1):end, 1, :]                               # (n_meta, n_samples) — [N_actual; cond...]
-
-        # Valid-particle mask: slot i is valid iff i ≤ N_actual for that sample
-        N_vals = x_m[1:1, :]                                       # (1, n_samples)
-        valid  = Float32.(reshape(Float32.(1:Nmax), Nmax, 1) .<= N_vals)  # (Nmax, n_samples)
-
-        # Broadcast conditioning scalars (meta[2:end]) to every particle slot
-        x_cond       = x_m[2:end, :]                              # (n_meta-1, n_samples)
-        x_cond_broad = repeat(reshape(x_cond, f.n_meta-1, 1, n_samples), 1, Nmax, 1)  # (n_meta-1, Nmax, n_samples)
-
-        # φ input: [xᵢ; cond...] for each slot → (n_meta, Nmax * n_samples)
-        phi_input = vcat(reshape(x_p, 1, Nmax, n_samples), x_cond_broad)  # (n_meta, Nmax, n_samples)
-        phi_input = reshape(phi_input, f.n_meta, Nmax * n_samples)
-
-        phi_out = f.phi(phi_input)                                 # (d, Nmax * n_samples)
-        d = size(phi_out, 1)
-        phi_out = reshape(phi_out, d, Nmax, n_samples)
-
-        # Masked mean: zero out padded slots, divide by N_actual (clamp to 1 to avoid NaN on zero-padded batch frames)
-        phi_out    = phi_out .* reshape(valid, 1, Nmax, n_samples)
-        N_vals_safe = max.(N_vals, 1f0)
-        aggregated = dropdims(sum(phi_out; dims=2); dims=2) ./ N_vals_safe  # (d, n_samples)
-
-        return f.rho(aggregated)                                   # (output_dim, n_samples)
-    end
-end
-
-# ========================
 # RNNDiagnostic
 # ========================
 
@@ -183,25 +95,15 @@ function (m::RNNDiagnostic)(x)
     @assert ndims(x) == 3 "Input size error: expected data in format (input_dim,sequence_length,batch_size)"
 
     total_dim, seq_len, batch_size = size(x)
-    feat_n_meta = hasproperty(m.featurizer, :n_meta) ? m.featurizer.n_meta : 0
+    feature_dim = total_dim - m.n_meta
+    x_feat = x[1:feature_dim, :, :]
+    x_meta = x[(feature_dim+1):end, :, :]          # (n_meta, seq_len, batch_size)
 
-    if feat_n_meta > 0
-        # Featurizer handles the full input (particles + metadata); no bypass needed
-        x_flat = reshape(x, total_dim, 1, seq_len * batch_size)
-        z = m.featurizer(x_flat)                       # (feat_dim, seq_len*batch)
-        z = reshape(z, size(z, 1), seq_len, batch_size)
-        # m.n_meta == 0 in this branch; no additional bypass
-    else
-        feature_dim = total_dim - m.n_meta
-        x_feat = x[1:feature_dim, :, :]
-        x_meta = x[(feature_dim+1):end, :, :]          # (n_meta, seq_len, batch_size)
+    x_flat = reshape(x_feat, feature_dim, 1, seq_len * batch_size)
+    z = m.featurizer(x_flat)                       # (feat_dim, seq_len*batch)
+    z = reshape(z, size(z, 1), seq_len, batch_size)
 
-        x_flat = reshape(x_feat, feature_dim, 1, seq_len * batch_size)
-        z = m.featurizer(x_flat)                       # (feat_dim, seq_len*batch)
-        z = reshape(z, size(z, 1), seq_len, batch_size)
-
-        m.n_meta > 0 && (z = vcat(z, x_meta))          # (feat_dim + n_meta, seq_len, batch_size)
-    end
+    m.n_meta > 0 && (z = vcat(z, x_meta))          # (feat_dim + n_meta, seq_len, batch_size)
 
     h = m.rnn(z)
 
@@ -214,53 +116,42 @@ end
 # ========================
 
 struct CNNFeaturizerHyperParams
+    input_dim_exponent::Int  # input_dim = 2^e, e.g. 5→32, 6→64, 7→128, 8→256
     depth::Int
-    width_exponent::Int   # channels = [2^w, 2^(w+1), ..., 2^(w+depth-1)]
-end
-
-struct DeepSetFeaturizerHyperParams
-    phi_depth::Int
-    phi_width_exponent::Int
-    rho_depth::Int
-    rho_width_exponent::Int
+    width_exponent::Int      # channels = [2^w, 2^(w+1), ..., 2^(w+depth-1)]
 end
 
 mutable struct RNNDiagnosticHyperParams
-    featurizer::Union{CNNFeaturizerHyperParams, DeepSetFeaturizerHyperParams}
+    featurizer::CNNFeaturizerHyperParams
     rnn_depth::Int
     rnn_width_exponent::Int
     mlp_depth::Int
     mlp_width_exponent::Int
 end
 
-# Backward-compatible positional constructor (assumes CNN featurizer)
+# Backward-compatible positional constructor (assumes CNN featurizer, default input_dim=64)
 function RNNDiagnosticHyperParams(cnn_depth::Int, cnn_width_exponent::Int,
     rnn_depth::Int, rnn_width_exponent::Int,
-    mlp_depth::Int, mlp_width_exponent::Int)
+    mlp_depth::Int, mlp_width_exponent::Int;
+    input_dim_exponent::Int = 6)
     return RNNDiagnosticHyperParams(
-        CNNFeaturizerHyperParams(cnn_depth, cnn_width_exponent),
+        CNNFeaturizerHyperParams(input_dim_exponent, cnn_depth, cnn_width_exponent),
         rnn_depth, rnn_width_exponent, mlp_depth, mlp_width_exponent
     )
 end
 
-function build_featurizer(hp::CNNFeaturizerHyperParams; input_dim::Int, n_meta::Int=0, rng=Random.GLOBAL_RNG)
-    nchannels = [2^i for i in hp.width_exponent:(hp.width_exponent + hp.depth - 1)]
+function build_featurizer(hp::CNNFeaturizerHyperParams; n_meta::Int=0, rng=Random.GLOBAL_RNG)
+    input_dim   = 2^hp.input_dim_exponent
+    nchannels   = [2^i for i in hp.width_exponent:(hp.width_exponent + hp.depth - 1)]
     kernel_dims = fill(5, hp.depth)
     return CNNFeaturizer(; input_dim=input_dim, kernel_dims=kernel_dims, nchannels=nchannels, rng=rng)
 end
 
-function build_featurizer(hp::DeepSetFeaturizerHyperParams; input_dim::Int, n_meta::Int=0, rng=Random.GLOBAL_RNG)
-    dims_phi = fill(2^hp.phi_width_exponent, hp.phi_depth)
-    dims_rho = fill(2^hp.rho_width_exponent, hp.rho_depth)
-    return DeepSetFeaturizer(; dims_phi=dims_phi, dims_rho=dims_rho, n_meta=n_meta, rng=rng)
-end
-
-function RNNDiagnostic(hp::RNNDiagnosticHyperParams; input_dim::Int=64, n_meta::Int=1, rng=Random.GLOBAL_RNG)
-    featurizer  = build_featurizer(hp.featurizer; input_dim=input_dim, n_meta=n_meta, rng=rng)
-    lstm_n_meta = (featurizer isa DeepSetFeaturizer && featurizer.n_meta > 0) ? 0 : n_meta
-    dims_rnn    = fill(2^hp.rnn_width_exponent, hp.rnn_depth)
-    dims_mlp    = fill(2^hp.mlp_width_exponent, hp.mlp_depth)
-    return RNNDiagnostic(featurizer; dims_rnn=dims_rnn, dims_mlp=dims_mlp, n_meta=lstm_n_meta, rng=rng)
+function RNNDiagnostic(hp::RNNDiagnosticHyperParams; n_meta::Int=1, rng=Random.GLOBAL_RNG)
+    featurizer = build_featurizer(hp.featurizer; n_meta=n_meta, rng=rng)
+    dims_rnn   = fill(2^hp.rnn_width_exponent, hp.rnn_depth)
+    dims_mlp   = fill(2^hp.mlp_width_exponent, hp.mlp_depth)
+    return RNNDiagnostic(featurizer; dims_rnn=dims_rnn, dims_mlp=dims_mlp, n_meta=n_meta, rng=rng)
 end
 
 # ========================
@@ -288,17 +179,9 @@ end
 
 function (m::RNNDiagnosticOnline)(x)
     @assert ndims(x) == 1 "RNNDiagnosticOnline only accepts 1D input vectors"
-    feat_n_meta = hasproperty(m.featurizer, :n_meta) ? m.featurizer.n_meta : 0
-
-    if feat_n_meta > 0
-        # Full vector (particles + meta); featurizer handles the split
-        # For online inference all particle slots are real (N_actual = total particles), no padding
-        z = vec(m.featurizer(reshape(x, length(x), 1, 1)))
-    else
-        feature_dim = length(x) - m.n_meta
-        z = vec(m.featurizer(reshape(x[1:feature_dim], feature_dim, 1, 1)))
-        m.n_meta > 0 && (z = vcat(z, x[(feature_dim+1):end]))  # append metadata before first LSTM cell
-    end
+    feature_dim = length(x) - m.n_meta
+    z = vec(m.featurizer(reshape(x[1:feature_dim], feature_dim, 1, 1)))
+    m.n_meta > 0 && (z = vcat(z, x[(feature_dim+1):end]))  # append metadata before first LSTM cell
 
     for (i, cell) in enumerate(m.rnn_cells)
         (z, m.rnn_state[i]) = cell(z, m.rnn_state[i])
@@ -315,29 +198,15 @@ end
 Convenience function reconstructing a RNNDiagnostic model from a saved state (NamedTuple).
 
 Supports both:
-- New format: state has a `featurizer` field (CNNFeaturizer or DeepSetFeaturizer)
+- New format: state has a `featurizer` field (CNNFeaturizer)
 - Old format: state has a `cnn_encoder` field (pre-refactor checkpoints)
 """
 function load_rnn_from_state(input_dim, state)
     if haskey(state, :featurizer)
         feat_state = state.featurizer
-        if haskey(feat_state, :encoder)
-            # CNNFeaturizer
-            kernel_widths = [size(l.weight, 1) for l in feat_state.encoder.layers[1:2:end]]
-            nchannels = [size(l.bias, 1) for l in feat_state.encoder.layers[1:2:end]]
-            featurizer = CNNFeaturizer(; input_dim=input_dim, kernel_dims=kernel_widths, nchannels=nchannels)
-        elseif haskey(feat_state, :phi)
-            # DeepSetFeaturizer
-            dims_phi = [size(l.bias, 1) for l in feat_state.phi.layers]
-            dims_rho = [size(l.bias, 1) for l in feat_state.rho.layers]
-            # Detect n_meta from φ input dimension:
-            # n_meta==0 (old) → phi_input_dim==1; n_meta==k≥2 → phi_input_dim==k
-            phi_input_dim = size(feat_state.phi.layers[1].weight, 2)
-            feat_n_meta   = (phi_input_dim == 1) ? 0 : phi_input_dim
-            featurizer = DeepSetFeaturizer(; dims_phi=dims_phi, dims_rho=dims_rho, n_meta=feat_n_meta)
-        else
-            error("Unknown featurizer type in saved state")
-        end
+        kernel_widths = [size(l.weight, 1) for l in feat_state.encoder.layers[1:2:end]]
+        nchannels = [size(l.bias, 1) for l in feat_state.encoder.layers[1:2:end]]
+        featurizer = CNNFeaturizer(; input_dim=input_dim, kernel_dims=kernel_widths, nchannels=nchannels)
 
         rnn_widths = [size(l.cell.Wh, 2) for l in state.rnn.layers]
         mlp_widths = [size(l.bias, 1) for l in state.mlp_head.layers]

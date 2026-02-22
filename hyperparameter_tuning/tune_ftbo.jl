@@ -366,10 +366,8 @@ end
 # ============================================================
 
 const BASE_SEED      = 2026
-const INPUT_DIM_CNN  = 64
-const INPUT_DIM_DS   = 200
 const BETA_LIMS      = (1.0, 3.0)
-const T_FINAL        = 20      # max training epochs per config (GP extrapolation horizon)
+const T_FINAL        = 30      # max training epochs per config (GP extrapolation horizon)
 const POT_PER_BATCH  = 5
 const TRACE_PER_POT  = 5
 const CUT_PER_TRACE  = 2
@@ -380,13 +378,14 @@ const NREPLICAS_LIMS = (10, 200)
 # Decode helpers  (x -> lr, hyperparams)
 # ============================================================
 
-# x[1]: log(lr)       [log(1e-4), log(1e-2)]
-# x[2]: rnn_depth     [0.5, 2.5]  → 1 or 2
-# x[3]: rnn_width_exp [4.5, 6.5]  → 5 or 6
-# x[4]: mlp_depth     [0.5, 2.5]  → 1 or 2
-# x[5]: mlp_width_exp [4.5, 6.5]  → 5 or 6
-# CNN x[6]: cnn_depth [2.5, 5.5]  → 3, 4, or 5
-# CNN x[7]: cnn_width [2.5, 4.5]  → 3 or 4
+# x[1]: log(lr)         [log(1e-4), log(1e-2)]
+# x[2]: rnn_depth       [0.5, 2.5]  → 1 or 2
+# x[3]: rnn_width_exp   [4.5, 7.5]  → 5 to 7
+# x[4]: mlp_depth       [0.5, 2.5]  → 1 or 2
+# x[5]: mlp_width_exp   [4.5, 7.5]  → 5 to 7
+# CNN x[6]: cnn_depth   [2.5, 5.5]  → 3 to 5
+# CNN x[7]: cnn_width   [2.5, 4.5]  → 3 to 5
+# CNN x[8]: input_dim_exp [3.5, 7.5] → 4 to 7  (16,32, 64 or 128 bins)
 
 function decode_cnn(x)
     lr            = exp(x[1])
@@ -396,29 +395,8 @@ function decode_cnn(x)
     mlp_width_exp = round(Int, x[5])
     cnn_depth     = round(Int, x[6])
     cnn_width_exp = round(Int, x[7])
-    feat_hp = CNNFeaturizerHyperParams(cnn_depth, cnn_width_exp)
-    h = RNNDiagnosticHyperParams(feat_hp, rnn_depth, rnn_width_exp,
-                                  mlp_depth, mlp_width_exp)
-    return lr, h
-end
-
-# DeepSet x[6]: phi_depth [0.5, 3.5]  → 1, 2, or 3
-# DeepSet x[7]: phi_width [2.5, 6.5]  → 3, 4, 5, or 6  (narrowed for 1-D input)
-# DeepSet x[8]: rho_depth [0.5, 3.5]  → 1, 2, or 3
-# DeepSet x[9]: rho_width [2.5, 6.5]  → 3, 4, 5, or 6  (narrowed for 1-D input)
-
-function decode_ds(x)
-    lr            = exp(x[1])
-    rnn_depth     = round(Int, x[2])
-    rnn_width_exp = round(Int, x[3])
-    mlp_depth     = round(Int, x[4])
-    mlp_width_exp = round(Int, x[5])
-    phi_depth     = round(Int, x[6])
-    phi_width_exp = round(Int, x[7])
-    rho_depth     = round(Int, x[8])
-    rho_width_exp = round(Int, x[9])
-    feat_hp = DeepSetFeaturizerHyperParams(phi_depth, phi_width_exp,
-                                            rho_depth, rho_width_exp)
+    input_dim_exp = round(Int, x[8])
+    feat_hp = CNNFeaturizerHyperParams(input_dim_exp, cnn_depth, cnn_width_exp)
     h = RNNDiagnosticHyperParams(feat_hp, rnn_depth, rnn_width_exp,
                                   mlp_depth, mlp_width_exp)
     return lr, h
@@ -433,7 +411,6 @@ function make_build_run_cnn()
         lr, h = decode_cnn(x)
         return build_candidate_run((lr, h);
             base_seed      = BASE_SEED + seed_offset,
-            input_dim      = INPUT_DIM_CNN,
             βlims          = BETA_LIMS,
             pot_per_batch  = POT_PER_BATCH,
             trace_per_pot  = TRACE_PER_POT,
@@ -445,24 +422,6 @@ function make_build_run_cnn()
     return build_run
 end
 
-function make_build_run_ds()
-    function build_run(x, seed_offset)
-        lr, h = decode_ds(x)
-        return build_candidate_run((lr, h);
-            base_seed      = BASE_SEED + seed_offset,
-            input_dim      = INPUT_DIM_DS,
-            βlims          = BETA_LIMS,
-            pot_per_batch  = POT_PER_BATCH,
-            trace_per_pot  = TRACE_PER_POT,
-            cut_per_trace  = CUT_PER_TRACE,
-            feature        = deep_set_feature,
-            stride_lims    = STRIDE_LIMS,
-            Nreplicas_lims = NREPLICAS_LIMS,
-            n_meta         = 2)
-    end
-    return build_run
-end
-
 # ============================================================
 # CNN Freeze-Thaw BO  (7-dimensional, 50 total steps)
 # ============================================================
@@ -470,21 +429,17 @@ end
 cnn_config_key(x) = (round(x[1]; digits=1),
                      round(Int,x[2]), round(Int,x[3]),
                      round(Int,x[4]), round(Int,x[5]),
-                     round(Int,x[6]), round(Int,x[7]))
-ds_config_key(x)  = (round(x[1]; digits=1),
-                     round(Int,x[2]), round(Int,x[3]),
-                     round(Int,x[4]), round(Int,x[5]),
                      round(Int,x[6]), round(Int,x[7]),
-                     round(Int,x[8]), round(Int,x[9]))
+                     round(Int,x[8]))
 
-println("\n=== CNN Freeze-Thaw BO (7 dims, n_init=5, n_iter=45) ===")
+println("\n=== CNN Freeze-Thaw BO (8 dims, n_init=5, n_iter=45) ===")
 
 result_cnn = freeze_thaw_bo_search(
     make_build_run_cnn(),
-    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5],
-    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5];
+    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5, 3.5],
+    [log(1e-2), 2.5, 7.5, 2.5, 7.5, 5.5, 4.5, 7.5];
     n_init          = 10,
-    n_iter          = 200,
+    n_iter          = 500,
     T_final         = T_FINAL,
     rng             = Xoshiro(BASE_SEED),
     config_key      = cnn_config_key,
@@ -502,33 +457,3 @@ JLD2.jldsave(joinpath(@__DIR__, "ftbo_results_cnn.jld2");
     best_model_state = Flux.state(result_cnn.best_config.run.model),
 )
 println("Saved → $(joinpath(@__DIR__, "ftbo_results_cnn.jld2"))")
-
-# ============================================================
-# DeepSet Freeze-Thaw BO  (9-dimensional, 60 total steps)
-# ============================================================
-
-println("\n=== DeepSet Freeze-Thaw BO (9 dims, n_init=5, n_iter=55) ===")
-
-result_ds = freeze_thaw_bo_search(
-    make_build_run_ds(),
-    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 0.5, 4.5, 0.5, 4.5],
-    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 3.5, 8.5, 3.5, 8.5];
-    n_init          = 10,
-    n_iter          = 200,
-    T_final         = T_FINAL,
-    rng             = Xoshiro(BASE_SEED + 1),
-    config_key      = ds_config_key,
-    prefix          = "deepset_",
-    checkpoint_path = joinpath(@__DIR__, "ftbo_checkpoint_ds.jld2"))
-
-println("\nDeepSet FTBO best loss: $(result_ds.best_loss)")
-
-pool_data_ds = [(x=cfg.x, ts=cfg.ts, losses=cfg.losses,
-                 model_state=Flux.state(cfg.run.model)) for cfg in result_ds.pool]
-JLD2.jldsave(joinpath(@__DIR__, "ftbo_results_ds.jld2");
-    pool             = pool_data_ds,
-    best_x           = result_ds.best_x,
-    best_loss        = result_ds.best_loss,
-    best_model_state = Flux.state(result_ds.best_config.run.model),
-)
-println("Saved → $(joinpath(@__DIR__, "ftbo_results_ds.jld2"))")
