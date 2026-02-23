@@ -275,11 +275,16 @@ const NREPLICAS_LIMS  = (10, 200)
 # x[3]: rnn_width_exp   [4.5, 6.5]  → 5 or 6
 # x[4]: mlp_depth       [0.5, 2.5]  → 1 or 2
 # x[5]: mlp_width_exp   [4.5, 6.5]  → 5 or 6
-# x[6]: cnn_depth       [2.5, 5.5]  → 3, 4, or 5
+# x[6]: cnn_depth       [2.5, 5.5]  → 3, 4, or 5  (clamped to input_dim_exp)
 # x[7]: cnn_width_exp   [2.5, 4.5]  → 3 or 4
 # x[8]: input_dim_exp   [4.5, 8.5]  → 5, 6, 7, or 8  (32, 64, 128, or 256 bins)
+# Constraint: cnn_depth ≤ input_dim_exp  (depth d MaxPool(2) layers require input_dim ≥ 2^d)
 
-cnn_builder(x) = (CNNFeaturizerHyperParams(round(Int, x[8]), round(Int, x[6]), round(Int, x[7])), 2)
+function cnn_builder(x)
+    input_dim_exp = round(Int, x[8])
+    cnn_depth     = min(round(Int, x[6]), input_dim_exp)
+    return (CNNFeaturizerHyperParams(input_dim_exp, cnn_depth, round(Int, x[7])), 2)
+end
 
 obj_cnn, hist_cnn = make_objective(;
     base_seed          = BASE_SEED,
@@ -293,11 +298,15 @@ obj_cnn, hist_cnn = make_objective(;
     stride_lims        = STRIDE_LIMS,
     Nreplicas_lims     = NREPLICAS_LIMS)
 
-cnn_config_key(x) = (round(x[1]; digits=1),
-                     round(Int,x[2]), round(Int,x[3]),
-                     round(Int,x[4]), round(Int,x[5]),
-                     round(Int,x[6]), round(Int,x[7]),
-                     round(Int,x[8]))
+function cnn_config_key(x)
+    input_dim_exp = round(Int, x[8])
+    cnn_depth     = min(round(Int, x[6]), input_dim_exp)
+    (round(x[1]; digits=1),
+     round(Int,x[2]), round(Int,x[3]),
+     round(Int,x[4]), round(Int,x[5]),
+     cnn_depth, round(Int,x[7]),
+     input_dim_exp)
+end
 
 println("\n=== CNN Bayesian Optimisation (8 dims, 50 iterations) ===")
 
@@ -323,14 +332,14 @@ println("Saved → $(joinpath(@__DIR__, "bo_results_cnn.jld2"))")
 # ============================================================
 
 function decode_cnn(x)
-    lr              = exp(x[1])
-    rnn_depth       = round(Int, x[2])
-    rnn_width_exp   = round(Int, x[3])
-    mlp_depth       = round(Int, x[4])
-    mlp_width_exp   = round(Int, x[5])
-    cnn_depth       = round(Int, x[6])
-    cnn_width_exp   = round(Int, x[7])
-    input_dim_exp   = round(Int, x[8])
+    lr            = exp(x[1])
+    rnn_depth     = round(Int, x[2])
+    rnn_width_exp = round(Int, x[3])
+    mlp_depth     = round(Int, x[4])
+    mlp_width_exp = round(Int, x[5])
+    input_dim_exp = round(Int, x[8])
+    cnn_depth     = min(round(Int, x[6]), input_dim_exp)  # depth ≤ log2(input_dim)
+    cnn_width_exp = round(Int, x[7])
     feat_hp = CNNFeaturizerHyperParams(input_dim_exp, cnn_depth, cnn_width_exp)
     h = RNNDiagnosticHyperParams(feat_hp, rnn_depth, rnn_width_exp,
                                   mlp_depth, mlp_width_exp)
