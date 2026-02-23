@@ -1,6 +1,5 @@
 function build_candidate_run(hyp;
         base_seed = 2025,
-        input_dim = 64,
         βlims = (1.0,3.0),
         pot_per_batch = 5,
         trace_per_pot = 5,
@@ -12,10 +11,12 @@ function build_candidate_run(hyp;
 
     lr, h = hyp   # h is a RNNDiagnosticHyperParams
 
+    input_dim = 2^h.featurizer.input_dim_exponent
+
     seed = base_seed + hash(hyp)
     rng = Xoshiro(seed)
 
-    model = RNNDiagnostic(h; input_dim=input_dim, n_meta=n_meta, rng=rng)
+    model = RNNDiagnostic(h; n_meta=n_meta, rng=rng)
 
     opt = Adam(lr)
     opt_state = Flux.setup(opt, model)
