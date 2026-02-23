@@ -384,7 +384,7 @@ const NREPLICAS_LIMS = (10, 200)
 # x[4]: mlp_depth       [0.5, 2.5]  → 1 or 2
 # x[5]: mlp_width_exp   [4.5, 7.5]  → 5 to 7
 # CNN x[6]: cnn_depth   [2.5, 5.5]  → 3 to 5
-# CNN x[7]: cnn_width   [2.5, 4.5]  → 3 to 5
+# CNN x[7]: cnn_width   [2.5, 3.5]  → 3 to 4
 # CNN x[8]: input_dim_exp [3.5, 7.5] → 4 to 7  (16,32, 64 or 128 bins)
 
 function decode_cnn(x)
@@ -437,7 +437,7 @@ println("\n=== CNN Freeze-Thaw BO (8 dims, n_init=5, n_iter=45) ===")
 result_cnn = freeze_thaw_bo_search(
     make_build_run_cnn(),
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5, 3.5],
-    [log(1e-2), 2.5, 7.5, 2.5, 7.5, 5.5, 4.5, 7.5];
+    [log(1e-2), 2.5, 7.5, 2.5, 7.5, 5.5, 3.5, 7.5];
     n_init          = 10,
     n_iter          = 500,
     T_final         = T_FINAL,
