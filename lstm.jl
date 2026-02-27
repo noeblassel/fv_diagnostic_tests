@@ -166,6 +166,8 @@ mutable struct RNNDiagnosticOnline{F<:AbstractFeaturizer, T<:AbstractVector, U<:
     n_meta::Int
 end
 
+Flux.@layer RNNDiagnosticOnline
+
 function RNNDiagnosticOnline(model::T) where {T}
     rnn_cells = [layer.cell for layer in model.rnn.layers]
     dims_rnn = [size(cell.bias, 1) ÷ 4 for cell in rnn_cells]
@@ -238,3 +240,123 @@ function load_rnn_from_state(input_dim, state)
 
     return model
 end
+
+
+# ==============
+# FRNNCell (FILM-modulated CNN featurizer + RNN)
+# ==============
+
+mutable struct FRNNCell{F,T,U,S,V}
+    conv_layers::F
+    rnn_layers::T
+    modulator_layers::S
+    decision_head::U
+    state::V
+    n_meta::Int
+end
+
+Flux.@layer FRNNCell
+
+function FRNNCell(; input_dim::Int,
+    kernel_sizes::Vector{Int},
+    n_kernels::Vector{Int},
+    rnn_hidden_dims::Vector{Int},
+    mlp_hidden_dims::Vector{Int},
+    n_meta::Int=0,
+    rng=Random.GLOBAL_RNG)
+
+    initializer = Flux.glorot_uniform(rng)
+    # push!(cnn_layers, Conv(tuple(kernel_size), in_channels => out_channels, pad=pad_size, leakyrelu, init=initializer))
+
+    # convolutional layers
+    conv_dim_tups = zip(kernel_sizes,[1,n_kernels[1:end-1]...],n_kernels)
+    conv_layers = [Chain(Conv(tuple(kernel_dim),dim_in=>dim_out,pad=(kernel_dim-1)÷2,leakyrelu,init=initializer),MaxPool((2,))) for (kernel_dim,dim_in,dim_out)=conv_dim_tups]
+    
+    conv_dims = Int[]
+
+    dim = input_dim
+    nchannels = 1
+    bs = 1
+
+    # infer dimensions in conv layers
+
+    for layer=conv_layers
+        dim,nchannels,bs = Flux.outputsize(layer,(dim,nchannels,bs))
+        push!(conv_dims,dim)
+    end
+
+    rnn_input_dim = last(conv_dims)*last(n_kernels) + n_meta
+
+    rnn_dim_pairs = zip([rnn_input_dim,rnn_hidden_dims[1:end-1]...],rnn_hidden_dims)
+    rnn_layers = [GRUCell(dim_in=>dim_out; init_kernel=initializer,init_recurrent_kernel=initializer) for (dim_in,dim_out)=rnn_dim_pairs]
+
+    state = tuple([Flux.initialstates(g) for g in rnn_layers]...)
+
+    mod_dim = last(rnn_hidden_dims) + n_meta # dimension of feature-modulating variable
+    modulator_layers = [(Dense(mod_dim=>n_channel,Flux.σ; init=initializer),Dense(mod_dim=>n_channel,Flux.σ; init=initializer)) for n_channel=n_kernels] # simple affine features, pushed through sigmoid
+
+    mlp_dim_pairs = zip([mod_dim-1,mlp_hidden_dims...],[mlp_hidden_dims...,1])
+    mlp_head = Chain((Dense(in_dim=>out_dim,leakyrelu;init=initializer) for (in_dim,out_dim)=mlp_dim_pairs)...)
+
+    return FRNNCell(conv_layers,rnn_layers,modulator_layers,mlp_head,state,n_meta)
+end
+
+Flux.initialstates(m::FRNNCell) = tuple([Flux.initialstates(g) for g in m.rnn_layers]...)
+
+# split/adjoint metadata
+
+split_input(x::AbstractMatrix) = @view(x[1:end-1, :]), @view(x[end, :])
+split_input(x::AbstractVector) = @view(x[1:end-1]), x[end]
+
+merge_input(x::AbstractVector, z::Number) = vcat(x, z)
+merge_input(x::AbstractMatrix, z::AbstractVector) = vcat(x, reshape(z, 1, :))
+# Handle initial (unbatched) GRU state with batched metadata: broadcast state across batch
+merge_input(x::AbstractVector, z::AbstractVector) = vcat(repeat(reshape(x, :, 1), 1, length(z)), reshape(z, 1, :))
+
+function (m::FRNNCell)(x, h)
+
+    # split features and metadata
+    x_feat, z = split_input(x)
+    x_feat = unsqueeze(x_feat, dims=2)  # (feature_dim, 1, B)
+
+    # modulation state: previous deepest GRU hidden state + metadata
+    mod_state = merge_input(last(h), z)  # (last_hidden_dim + n_meta, B)
+
+    # FILM-modulated CNN -- broadcast over channel dimension
+    for i in eachindex(m.conv_layers)
+        x_feat = m.conv_layers[i](x_feat)
+        γ_layer, β_layer = m.modulator_layers[i]
+        w_γ = γ_layer(mod_state) |> Flux.σ  # (ch_i, B)
+        w_β = β_layer(mod_state) |> Flux.σ  # (ch_i, B)
+        x_feat = x_feat .* unsqueeze(w_γ, dims=1)
+        x_feat = x_feat .+ unsqueeze(w_β, dims=1)
+    end
+
+    # flatten CNN output and concatenate with metadata
+    sp, ch, B_size = size(x_feat)
+    x_flat = reshape(x_feat, sp * ch, B_size)
+    rnn_inp = merge_input(x_flat, z)  # (sp*ch_last + n_meta, B)
+
+    # GRU forward pass
+    (new_h, rnn_inp) = foldl(zip(m.rnn_layers, h); init=((), rnn_inp)) do (states, inp), (layer, hi)
+        h_new, _ = layer(inp, hi)
+        ((states..., h_new), h_new)
+    end
+
+    # decision head: last GRU hidden state → scalar logit
+    y_out = m.decision_head(rnn_inp)  # (1, B)
+
+    return vec(y_out), new_h
+end
+
+struct FRNNDiagnostic{C}
+    recur::C
+end
+
+Flux.@layer FRNNDiagnostic
+
+FRNNDiagnostic(args...; kwargs...) = FRNNDiagnostic(Recurrence(FRNNCell(args...; kwargs...)))
+
+# Flux.Recurrence on a (B,) vector-output cell produces (B, T).
+# Transpose to (T, B) to match the output contract expected by train_lstm.jl.
+(m::FRNNDiagnostic)(x) = permutedims(m.recur(x), (2, 1))

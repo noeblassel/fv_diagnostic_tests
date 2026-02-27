@@ -16,6 +16,7 @@ module FVDiagnosticTests
     export AbstractFeaturizer, CNNFeaturizer
     export CNNFeaturizerHyperParams
     export RNNDiagnostic, RNNDiagnosticHyperParams, RNNDiagnosticOnline, load_rnn_from_state, reset_rnn_state!
+    export FRNNCell, FRNNDiagnostic
     export TrainingRun, test_accuracy!, run_epoch!
     export build_candidate_run, run_tournament!
 

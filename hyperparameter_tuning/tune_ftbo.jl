@@ -212,6 +212,8 @@ function freeze_thaw_bo_search(build_run, lb, ub;
     # Run one full training epoch then measure test loss.
     # Each FTBO acquisition step corresponds to exactly one training epoch.
     function eval_chunk!(run)
+        println("Evaluating run with model: $(repr("text/plain",run.model))")
+
         run_epoch_offline!(run, HP_TRAIN)
         result = test_loss_offline!(run, HP_TEST)
         println("      acc=$(round(result.acc * 100; digits=1))%")
@@ -336,8 +338,7 @@ function freeze_thaw_bo_search(build_run, lb, ub;
             println("  [FTBO] iter $iter/$n_iter  THAW config $chosen_pool_idx" *
                     " (chunk $t_next/$T_final)" *
                     "  loss=$(round(loss; digits=4))" *
-                    "  best=$(round(minimum(minimum(cfg.losses) for cfg in pool); digits=4))" *
-                     "  model: $(repr("text/plain",cfg.run.model))")
+                    "  best=$(round(minimum(minimum(cfg.losses) for cfg in pool); digits=4))")
         else
             loss = launch_config!(chosen_x_new)
             println("  [FTBO] iter $iter/$n_iter  NEW config #$(length(pool))" *
@@ -365,7 +366,7 @@ end
 # Shared settings (match tune_bo.jl where applicable)
 # ============================================================
 
-const BASE_SEED      = 2026
+const BASE_SEED      = 2025
 const BETA_LIMS      = (1.0, 3.0)
 const T_FINAL        = 30      # max training epochs per config (GP extrapolation horizon)
 const POT_PER_BATCH  = 5
@@ -384,7 +385,7 @@ const NREPLICAS_LIMS = (10, 200)
 # x[4]: mlp_depth       [0.5, 2.5]  → 1 or 2
 # x[5]: mlp_width_exp   [4.5, 7.5]  → 5 to 7
 # CNN x[6]: cnn_depth   [2.5, 5.5]  → 3 to 5  (clamped to input_dim_exp)
-# CNN x[7]: cnn_width   [2.5, 3.5]  → 3 to 4
+# CNN x[7]: cnn_width   [2.5, 4.5]  → 3 to 5
 # CNN x[8]: input_dim_exp [3.5, 7.5] → 4 to 7  (16, 32, 64, or 128 bins)
 # Constraint: cnn_depth ≤ input_dim_exp  (depth d MaxPool(2) layers require input_dim ≥ 2^d)
 
@@ -437,28 +438,106 @@ function cnn_config_key(x)
      input_dim_exp)
 end
 
-println("\n=== CNN Freeze-Thaw BO (8 dims, n_init=5, n_iter=45) ===")
+# ─────────────────────────────────────────────────────────────────────────────
+# FRRN (FILM-modulated CNN + GRU) helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
-result_cnn = freeze_thaw_bo_search(
-    make_build_run_cnn(),
+function decode_frnn(x)
+    lr            = exp(x[1])
+    rnn_depth     = round(Int, x[2])
+    rnn_width_exp = round(Int, x[3])
+    mlp_depth     = round(Int, x[4])
+    mlp_width_exp = round(Int, x[5])
+    input_dim_exp = round(Int, x[8])
+    cnn_depth     = min(round(Int, x[6]), input_dim_exp)  # depth ≤ log2(input_dim)
+    cnn_width_exp = round(Int, x[7])
+
+    input_dim       = 2^input_dim_exp
+    kernel_sizes    = fill(5, cnn_depth)
+    n_kernels       = [2^(cnn_width_exp + i - 1) for i in 1:cnn_depth]
+    rnn_hidden_dims = fill(2^rnn_width_exp, rnn_depth)
+    mlp_hidden_dims = fill(2^mlp_width_exp, mlp_depth)
+
+    return lr, (; input_dim, kernel_sizes, n_kernels, rnn_hidden_dims, mlp_hidden_dims)
+end
+
+function make_build_run_frnn()
+    function build_run(x, seed_offset)
+        lr, hp = decode_frnn(x)
+        rng    = Xoshiro(BASE_SEED + seed_offset)
+        model  = FRNNDiagnostic(;
+            input_dim       = hp.input_dim,
+            kernel_sizes    = hp.kernel_sizes,
+            n_kernels       = hp.n_kernels,
+            rnn_hidden_dims = hp.rnn_hidden_dims,
+            mlp_hidden_dims = hp.mlp_hidden_dims,
+            n_meta          = 1,
+            rng             = rng)
+        opt_state = Flux.setup(Adam(lr), model)
+        return TrainingRun(
+            rng            = rng,
+            βlims          = BETA_LIMS,
+            opt_state      = opt_state,
+            model          = model,
+            feature        = hist_feature,
+            input_dim      = hp.input_dim,
+            pot_per_batch  = POT_PER_BATCH,
+            trace_per_pot  = TRACE_PER_POT,
+            cut_per_trace  = CUT_PER_TRACE,
+            id             = "frnn_$(BASE_SEED + seed_offset)",
+            stride_lims    = STRIDE_LIMS,
+            Nreplicas_lims = NREPLICAS_LIMS,
+            n_meta         = 1)
+    end
+    return build_run
+end
+
+function frnn_config_key(x)
+    input_dim_exp = round(Int, x[8])
+    cnn_depth     = min(round(Int, x[6]), input_dim_exp)
+    (round(x[1]; digits=1),
+     round(Int,x[2]), round(Int,x[3]),
+     round(Int,x[4]), round(Int,x[5]),
+     cnn_depth, round(Int,x[7]),
+     input_dim_exp)
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dispatch on CLI argument
+# ─────────────────────────────────────────────────────────────────────────────
+
+const MODEL_ARG = get(ARGS, 1, "cnn")
+MODEL_ARG in ("cnn", "frnn") || error("Usage: julia tune_ftbo.jl [cnn|frnn]")
+
+println("\n=== $(uppercase(MODEL_ARG)) Freeze-Thaw BO (8 dims, n_init=10, n_iter=500) ===")
+
+_build_run   = MODEL_ARG == "cnn" ? make_build_run_cnn()  : make_build_run_frnn()
+_config_key  = MODEL_ARG == "cnn" ? cnn_config_key        : frnn_config_key
+_rng_seed    = MODEL_ARG == "cnn" ? BASE_SEED              : BASE_SEED + 1
+_prefix      = MODEL_ARG * "_"
+_checkpoint  = joinpath(@__DIR__, "ftbo_checkpoint_$(MODEL_ARG).jld2")
+_results_out = joinpath(@__DIR__, "ftbo_results_$(MODEL_ARG).jld2")
+
+result = freeze_thaw_bo_search(
+    _build_run,
     [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5, 3.5],
-    [log(1e-2), 2.5, 7.5, 2.5, 7.5, 5.5, 3.5, 7.5];
+    [log(1e-2), 2.5, 7.5, 2.5, 7.5, 5.5, 4.5, 7.5];
     n_init          = 10,
     n_iter          = 500,
     T_final         = T_FINAL,
-    rng             = Xoshiro(BASE_SEED),
-    config_key      = cnn_config_key,
-    prefix          = "cnn_",
-    checkpoint_path = joinpath(@__DIR__, "ftbo_checkpoint_cnn.jld2"))
+    rng             = Xoshiro(_rng_seed),
+    config_key      = _config_key,
+    prefix          = _prefix,
+    checkpoint_path = _checkpoint)
 
-println("\nCNN FTBO best loss: $(result_cnn.best_loss)")
+println("\n$(uppercase(MODEL_ARG)) FTBO best loss: $(result.best_loss)")
 
-pool_data_cnn = [(x=cfg.x, ts=cfg.ts, losses=cfg.losses,
-                  model_state=Flux.state(cfg.run.model)) for cfg in result_cnn.pool]
-JLD2.jldsave(joinpath(@__DIR__, "ftbo_results_cnn.jld2");
-    pool             = pool_data_cnn,
-    best_x           = result_cnn.best_x,
-    best_loss        = result_cnn.best_loss,
-    best_model_state = Flux.state(result_cnn.best_config.run.model),
+pool_data = [(x=cfg.x, ts=cfg.ts, losses=cfg.losses,
+              model_state=Flux.state(cfg.run.model)) for cfg in result.pool]
+JLD2.jldsave(_results_out;
+    pool             = pool_data,
+    best_x           = result.best_x,
+    best_loss        = result.best_loss,
+    best_model_state = Flux.state(result.best_config.run.model),
 )
-println("Saved → $(joinpath(@__DIR__, "ftbo_results_cnn.jld2"))")
+println("Saved → $(_results_out)")
