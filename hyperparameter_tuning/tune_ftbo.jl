@@ -518,10 +518,22 @@ _prefix      = MODEL_ARG * "_"
 _checkpoint  = joinpath(@__DIR__, "ftbo_checkpoint_$(MODEL_ARG).jld2")
 _results_out = joinpath(@__DIR__, "ftbo_results_$(MODEL_ARG).jld2")
 
+
+
+# x[1]: log(lr)         [log(1e-4), log(1e-2)]
+# x[2]: rnn_depth       [0.5, 3.5]  → 1 to 3
+# x[3]: rnn_width_exp   [3.5, 7.5]  → 4 to 7
+# x[4]: mlp_depth       [0.5, 2.5]  → 1 or 2
+# x[5]: mlp_width_exp   [3.5, 7.5]  → 4 to 7
+# CNN x[6]: cnn_depth   [1.5, 5.5]  → 2 to 5  (clamped to input_dim_exp)
+# CNN x[7]: cnn_width   [2.5, 7.5]  → 3 to 7
+# CNN x[8]: input_dim_exp [3.5, 7.5] → 4 to 7  (16, 32, 64, or 128 bins)
+# Constraint: cnn_depth ≤ input_dim_exp  (depth d MaxPool(2) layers require input_dim ≥ 2^d)
+
 result = freeze_thaw_bo_search(
     _build_run,
-    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5, 3.5],
-    [log(1e-2), 2.5, 7.5, 2.5, 7.5, 5.5, 4.5, 7.5];
+    [log(1e-4), 0.5, 3.5, 0.5, 3.5, 1.5, 2.5, 3.5],
+    [log(1e-1), 3.5, 7.5, 2.5, 7.5, 5.5, 7.5, 7.5];
     n_init          = 10,
     n_iter          = 500,
     T_final         = T_FINAL,
