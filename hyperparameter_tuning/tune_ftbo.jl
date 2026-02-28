@@ -209,14 +209,21 @@ function freeze_thaw_bo_search(build_run, lb, ub;
     pool       = FrozenConfig[]
     call_count = Ref(0)
 
+    n_params(m) = sum(length,Flux.trainables(m)) # convenience, total number of params
     # Run one full training epoch then measure test loss.
     # Each FTBO acquisition step corresponds to exactly one training epoch.
     function eval_chunk!(run)
         println("Evaluating run with model: $(repr("text/plain",run.model))")
 
+        if n_params(run.model) > NPARAMS_MAX
+            println("Exceeded max number of parameters")
+            return 1.f0 # upper bound on loss
+        end
+
         run_epoch_offline!(run, HP_TRAIN)
         result = test_loss_offline!(run, HP_TEST)
         println("      acc=$(round(result.acc * 100; digits=1))%")
+        
         return result.loss
     end
 
@@ -374,6 +381,8 @@ const TRACE_PER_POT  = 5
 const CUT_PER_TRACE  = 2
 const STRIDE_LIMS    = (10, 200)
 const NREPLICAS_LIMS = (10, 200)
+
+const NPARAMS_MAX = 500_000 # clamp to 500K parameter models
 
 # ============================================================
 # Decode helpers  (x -> lr, hyperparams)
