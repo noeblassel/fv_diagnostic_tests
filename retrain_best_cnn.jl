@@ -17,10 +17,10 @@ using Flux, JLD2, Statistics, Random, Dates, ProgressMeter
 
 # ── Settings ─────────────────────────────────────────────────────────────────
 
-const N_SEEDS          = 5        # number of independent seeds to try
+const N_SEEDS          = 20        # number of independent seeds to try
 const N_TRAIN_BATCHES  = 50      # training batches per epoch
 const N_TEST_BATCHES   = 50       # test batches for validation
-const N_EPOCHS         = 200       # total training epochs per seed
+const N_EPOCHS         = 20       # total training epochs per seed
 const BETA_LIMS        = (1.0, 3.0)
 const POT_PER_BATCH    = 5
 const TRACE_PER_POT    = 5
