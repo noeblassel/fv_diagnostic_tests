@@ -1,7 +1,8 @@
 module FVDiagnosticTests
 
     using Random, Dates
-    using Flux, ParameterSchedulers, MLUtils, JLD2, ProgressMeter
+    using Flux, Zygote, ParameterSchedulers, MLUtils
+    using JLD2, ProgressMeter
     using StatsBase
 
     using Random, Distributions, StatsBase, Statistics

@@ -246,8 +246,9 @@ end
 # FRNNCell (FILM-modulated CNN featurizer + RNN)
 # ==============
 
-mutable struct FRNNCell{F,T,U,S,V}
+mutable struct FRNNCell{F,N,T,U,S,V}
     conv_layers::F
+    norm_layers::N
     rnn_layers::T
     modulator_layers::S
     decision_head::U
@@ -270,8 +271,11 @@ function FRNNCell(; input_dim::Int,
 
     # convolutional layers
     conv_dim_tups = zip(kernel_sizes,[1,n_kernels[1:end-1]...],n_kernels)
-    conv_layers = [Chain(Conv(tuple(kernel_dim),dim_in=>dim_out,pad=(kernel_dim-1)÷2,leakyrelu,init=initializer),MaxPool((2,))) for (kernel_dim,dim_in,dim_out)=conv_dim_tups]
-    
+    conv_layers = [Chain(Conv(tuple(kernel_dim),dim_in=>dim_out,pad=(kernel_dim-1)÷2,init=initializer),MaxPool((2,))) for (kernel_dim,dim_in,dim_out)=conv_dim_tups]
+    # norm_layers = tuple([Flux.InstanceNorm(n_ch, affine=false) for n_ch in n_kernels]...)
+    norm_layers = tuple([identity for n_ch in n_kernels]...) # remove normalization
+
+        
     conv_dims = Int[]
 
     dim = input_dim
@@ -288,18 +292,19 @@ function FRNNCell(; input_dim::Int,
     rnn_input_dim = last(conv_dims)*last(n_kernels) + n_meta
 
     rnn_dim_pairs = zip([rnn_input_dim,rnn_hidden_dims[1:end-1]...],rnn_hidden_dims)
-    rnn_layers = [GRUCell(dim_in=>dim_out; init_kernel=initializer,init_recurrent_kernel=initializer) for (dim_in,dim_out)=rnn_dim_pairs]
+    rnn_layers = [LSTMCell(dim_in=>dim_out; init_kernel=initializer,init_recurrent_kernel=initializer) for (dim_in,dim_out)=rnn_dim_pairs]
 
     state = tuple([Flux.initialstates(g) for g in rnn_layers]...)
 
     mod_dim = last(rnn_hidden_dims) + n_meta # dimension of feature-modulating variable
-    modulator_layers = [(Dense(mod_dim=>n_channel,Flux.σ; init=initializer),Dense(mod_dim=>n_channel,Flux.σ; init=initializer)) for n_channel=n_kernels] # simple affine features, pushed through sigmoid
+    modulator_layers = [(Dense(mod_dim=>n_channel; init=Flux.zeros32),Dense(mod_dim=>n_channel; init=Flux.zeros32)) for n_channel=n_kernels] # affine modulation (initialized at zero = standard CNN -> RNN)
 
     mlp_dim_pairs = zip([mod_dim-1,mlp_hidden_dims...],[mlp_hidden_dims...,1])
     mlp_head = Chain((Dense(in_dim=>out_dim,leakyrelu;init=initializer) for (in_dim,out_dim)=mlp_dim_pairs)...)
 
-    return FRNNCell(conv_layers,rnn_layers,modulator_layers,mlp_head,state,n_meta)
+    return FRNNCell(conv_layers,norm_layers,rnn_layers,modulator_layers,mlp_head,state,n_meta)
 end
+
 
 Flux.initialstates(m::FRNNCell) = tuple([Flux.initialstates(g) for g in m.rnn_layers]...)
 
@@ -319,17 +324,23 @@ function (m::FRNNCell)(x, h)
     x_feat, z = split_input(x)
     x_feat = unsqueeze(x_feat, dims=2)  # (feature_dim, 1, B)
 
-    # modulation state: previous deepest GRU hidden state + metadata
-    mod_state = merge_input(last(h), z)  # (last_hidden_dim + n_meta, B)
+    # modulation state: deepest LSTM **output** state + metadata
+    hi,ci = h[end]
+    mod_state = merge_input(hi,z) # (last_hidden_dim + n_meta, B)
+    
+    #Zygote.dropgrad(merge_input(hi, z))   -- treated as constant in the convolutional layer
 
-    # FILM-modulated CNN -- broadcast over channel dimension
+    # FILM-modulated CNN: Conv → BatchNorm(affine=false) → FiLM → LeakyReLU
     for i in eachindex(m.conv_layers)
-        x_feat = m.conv_layers[i](x_feat)
+        x_feat = m.conv_layers[i](x_feat)          # Conv (no act) → MaxPool
+        x_feat = m.norm_layers[i](x_feat)           # BatchNorm(affine=false)
+
         γ_layer, β_layer = m.modulator_layers[i]
-        w_γ = γ_layer(mod_state) |> Flux.σ  # (ch_i, B)
-        w_β = β_layer(mod_state) |> Flux.σ  # (ch_i, B)
-        x_feat = x_feat .* unsqueeze(w_γ, dims=1)
-        x_feat = x_feat .+ unsqueeze(w_β, dims=1)
+        w_γ = 1.f0 .+ γ_layer(mod_state)  # (ch_i, B)
+        w_β = β_layer(mod_state)  # (ch_i, B)
+        x_feat_mod = x_feat .* unsqueeze(w_γ, dims=1)   # FiLM scale
+        x_feat_mod = x_feat_mod .+ unsqueeze(w_β, dims=1)   # FiLM shift
+        x_feat = x_feat + leakyrelu.(x_feat_mod)                  # residual connection + FiLM-modulated activation
     end
 
     # flatten CNN output and concatenate with metadata
@@ -337,10 +348,10 @@ function (m::FRNNCell)(x, h)
     x_flat = reshape(x_feat, sp * ch, B_size)
     rnn_inp = merge_input(x_flat, z)  # (sp*ch_last + n_meta, B)
 
-    # GRU forward pass
+    # LSTM forward pass
     (new_h, rnn_inp) = foldl(zip(m.rnn_layers, h); init=((), rnn_inp)) do (states, inp), (layer, hi)
-        h_new, _ = layer(inp, hi)
-        ((states..., h_new), h_new)
+        output,state = layer(inp, hi)
+        ((states..., state), output)
     end
 
     # decision head: last GRU hidden state → scalar logit
