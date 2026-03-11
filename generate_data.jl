@@ -198,7 +198,7 @@ function conv_tv(P, ν, ix, tv_tol=0.1; max_iter=1000)
     end
 end
 
-function sim_fv(V′, D, D′, dt, β, Nrep, nsteps, stride, x0, rng; naive::Bool=false)
+function sim_fv(V′, D, D′, dt, β, Nrep, nsteps, stride, x0, rng)
     fv_frames = Vector{Float32}[]
     fv = fill(x0, Nrep)
 
@@ -231,27 +231,21 @@ function sim_fv(V′, D, D′, dt, β, Nrep, nsteps, stride, x0, rng; naive::Boo
         step_in_window = mod1(k, stride)
         fv_trace_buf[(step_in_window - 1)*Nrep + 1 : step_in_window*Nrep] .= fv
 
-        if naive                                                                # opt 3: skip GR/W1 accumulation when not needed
-            sum_lin_gr += fv
-            sum_sq_gr  += fv .^ 2
-        end
+        sum_lin_gr += fv
+        sum_sq_gr  += fv .^ 2
 
         if k % stride == 0
-            if naive
-                push!(gr_hist, (sum(sum_sq_gr) - sum(sum_lin_gr)^2/(Nrep*k)) / (sum(sum_sq_gr - (sum_lin_gr .^ 2)/k)) - 1)
+            push!(gr_hist, (sum(sum_sq_gr) - sum(sum_lin_gr)^2/(Nrep*k)) / (sum(sum_sq_gr - (sum_lin_gr .^ 2)/k)) - 1)
 
-                if !isempty(fv_frames)
-                    push!(w1_hist, w1(last(fv_frames), fv_trace_buf))
-                end
+            if !isempty(fv_frames)
+                push!(w1_hist, w1(last(fv_frames), fv_trace_buf))
             end
 
             push!(fv_frames, copy(fv_trace_buf))                               # opt 4: one allocation per frame instead of stride allocations
         end
     end
 
-    if naive
-        w1_hist /= w1_hist[2]                                                  # normalize W1-distance by first decrement
-    end
+    w1_hist /= w1_hist[2]                                                      # normalize W1-distance by first decrement
 
     return (fv_frames=fv_frames, gr_history=gr_hist, w1_history=w1_hist)
 end
@@ -370,18 +364,17 @@ function get_batch(rng;
     min_length=5,
     ncorr=2,
     max_attempts::Int=10,
-    naive = false)
+    potential_kwargs::NamedTuple=NamedTuple())
 
     batch = Vector{Vector{Float32}}[]
+    naive_batch = Vector{Vector{Float32}}[]   # GR/W1 diagnostics (always computed)
     labels = Vector{Float32}[]
     βmin,βmax = βlims
 
     i = 0
 
-    naive && (input_dim = 2)
-
     while i < npot
-        W, D, W′, D′ = generate_potential(rng=rng)
+        W, D, W′, D′ = generate_potential(; rng=rng, potential_kwargs...)
 
         β = βmin+(βmax-βmin)*rand(rng) # sample random temperature
 
@@ -420,7 +413,7 @@ function get_batch(rng;
                     T_conv         = decorr_step_gt * tau_gt
                     nframes_target = max(min_length, round(Int, ncorr * T_conv / (stride_j * dt)))
                     nsteps_total   = nframes_target * stride_j
-                    local_fv       = sim_fv(W′, D, D′, dt, β, Nreplicas_j, nsteps_total, stride_j, x0, local_rng; naive=naive)
+                    local_fv       = sim_fv(W′, D, D′, dt, β, Nreplicas_j, nsteps_total, stride_j, x0, local_rng)
 
                     if length(local_fv.fv_frames) >= min_length
                         success = true
@@ -471,15 +464,13 @@ function get_batch(rng;
                 l         = length(fv_frames)
 
                 features = Vector{Float32}[]
+                naive_features = Vector{Float32}[]
 
-                if !naive
-                    for f = fv_frames
-                        push!(features, feature(f, input_dim))
-                    end
-                else
-                    for k = 1:size(gr_hist, 1)
-                        push!(features, Float32.([gr_hist[k], w1_hist[k]]))
-                    end
+                for f = fv_frames
+                    push!(features, feature(f, input_dim))
+                end
+                for k = 1:length(gr_hist)
+                    push!(naive_features, Float32.([gr_hist[k], w1_hist[k]]))
                 end
 
                 # Append metadata scalars to every frame
@@ -501,11 +492,13 @@ function get_batch(rng;
                     α     = α_min + rand(rng) * (1.0 - α_min)
                     len   = clamp(round(Int, α * l), min_length, l)
                     push!(batch, features[1:len])
+                    push!(naive_batch, naive_features[1:len])
                     push!(labels, Float32.(full_labels[1:len]))
                 end
 
                 if ncut == 0
                     push!(batch, features)
+                    push!(naive_batch, naive_features)
                     push!(labels, Float32.(full_labels))
                 end
             end
@@ -525,10 +518,11 @@ function get_batch(rng;
     p = randperm(rng, nsamples)
 
     batch_X = batchseq(view(batch, p), zeros(Float32, input_dim + n_meta))
+    batch_N = batchseq(view(naive_batch, p), zeros(Float32, 2))
     batch_Y = batchseq(view(labels, p), dummy_val)
 
     Y = stack(batch_Y,dims=1)
     mask = (Y .!= dummy_val)
 
-    return stack(batch_X, dims=2), Y, mask
+    return stack(batch_X, dims=2), Y, mask, stack(batch_N, dims=2)
 end
