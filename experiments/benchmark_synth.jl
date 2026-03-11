@@ -61,11 +61,11 @@ println("Loaded model from $(prefix).jld2  (input_dim=$input_dim, params=$(sum(l
 # --- Configuration ---
 stride_values    = [10, 25, 50, 100, 150, 200]
 Nreplicas_values = [10, 25, 50, 100, 150, 200]
-num_batches      = 20
+num_batches      = 200
 npot_per_batch   = 5
 ntrace_per_pot   = 5
 alpha_values     = Float32[0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
-ncorr            = 5
+ncorr            = 10
 time_bins        = 0.0:0.1:Float64(ncorr)   # t/t_corr ∈ [0, ncorr]
 nbins_time       = length(time_bins) - 1
 detect_bins      = 0.0:0.05:Float64(ncorr)  # finer bins for detection time histogram
