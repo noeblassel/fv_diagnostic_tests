@@ -170,8 +170,9 @@ function evaluate_grid(model, rng;
                         end
                     end
 
-                    # ROC: one independent sample per trajectory (alpha-independent)
-                    k_roc = rand(rng, 1:traj_len)
+                    # ROC: one independent sample per trajectory (alpha-independent) -- between 0 and 2tcorr for balanced sampling of positive and negative frames
+                    n_roc = min(traj_len, 2 * decorr_step)
+                    k_roc = rand(rng, 1:n_roc)
                     sample = (Yhat_prob[k_roc, j], Y[k_roc, j])
                     push!(roc_samples[si, ni], sample)
                     push!(roc_samples_all, sample)
