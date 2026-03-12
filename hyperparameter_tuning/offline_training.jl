@@ -31,8 +31,11 @@ function _assemble_batch(dataset, indices, rng; feature, input_dim, n_meta::Int=
             features = [vcat(feature(f, input_dim), [meta_val]) for f in fv_frames_k]
         end
 
-        α   = (min_length / l) + rand(rng) * (1.0 - min_length / l)
-        len = clamp(round(Int, α * l), min_length, l)
+        # Cut between decorrelation frame and full length, mirroring get_batch
+        stride_k = dataset.strides[k]
+        T_conv_k = dataset.T_convs[k]
+        decorr_frame = max(min_length, ceil(Int, T_conv_k / (stride_k * dt)))
+        len = clamp(rand(rng, decorr_frame:l), min_length, l)
         push!(batch,        features[1:len])
         push!(labels_batch, Float32.(full_labels_k[1:len]))
     end
