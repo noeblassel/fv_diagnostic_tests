@@ -64,9 +64,9 @@ function eval_metrics(;
     nsamps_time = zeros(nbins_time, nvals)    
 
     @showprogress for n = 1:num_samples
-        X, Y, mask = get_batch(rng; input_dim=input_dim, ntrace=ntrace, npot=npot_per_chunk, ncut=ncut,feature=dummy_feature, βlims=βlims,ncorr=ncorr,naive=true)
+        _, Y, mask, X_naive = get_batch(rng; input_dim=input_dim, ntrace=ntrace, npot=npot_per_chunk, ncut=ncut,feature=dummy_feature, βlims=βlims,ncorr=ncorr)
         Y_true = Y[mask]
-        Yhat_diagnostic = (diagnostic == :gr) ? X[1,:,:] : X[2,:,:]
+        Yhat_diagnostic = (diagnostic == :gr) ? X_naive[1,:,:] : X_naive[2,:,:]
         
         npts = length(Y_true)
         ntrue = sum(Y_true .== 1.0f0)

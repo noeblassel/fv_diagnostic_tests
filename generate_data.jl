@@ -252,6 +252,24 @@ end
 
 @inline get_bin(val,minval,maxval,nbins) = 1+clamp(floor(Int,nbins*(val-minval)/(maxval-minval)),0,nbins-1)
 
+"""
+    compute_tv_from_qsd(frame, ν, Ngrid)
+
+Compute the (unnormalized) TV distance between the empirical distribution of `frame`
+(particle positions in [0,1]) and the QSD `ν` on the interior FP grid.
+"""
+function compute_tv_from_qsd(frame, ν, Ngrid)
+    emp = zeros(Ngrid)
+    dx = 1.0 / (Ngrid + 1)
+    for p in frame
+        j = clamp(round(Int, p / dx), 1, Ngrid)
+        emp[j] += 1.0
+    end
+    s = sum(emp)
+    s > 0 && (emp ./= s)
+    return sum(abs, emp - ν)
+end
+
 function raw_feature(pts,dim_feature)
     return Float32.(pts)
 end
@@ -470,7 +488,8 @@ function get_batch(rng;
                     push!(features, feature(f, input_dim))
                 end
                 for k = 1:length(gr_hist)
-                    push!(naive_features, Float32.([gr_hist[k], w1_hist[k]]))
+                    tv_k = compute_tv_from_qsd(fv_frames[k], ν, Ngrid)
+                    push!(naive_features, Float32.([gr_hist[k], w1_hist[k], tv_k]))
                 end
 
                 # Append metadata scalars to every frame
@@ -518,7 +537,7 @@ function get_batch(rng;
     p = randperm(rng, nsamples)
 
     batch_X = batchseq(view(batch, p), zeros(Float32, input_dim + n_meta))
-    batch_N = batchseq(view(naive_batch, p), zeros(Float32, 2))
+    batch_N = batchseq(view(naive_batch, p), zeros(Float32, 3))
     batch_Y = batchseq(view(labels, p), dummy_val)
 
     Y = stack(batch_Y,dims=1)

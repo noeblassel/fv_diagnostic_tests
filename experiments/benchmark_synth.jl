@@ -108,6 +108,7 @@ dt               = something(cli_dt, 1e-3)
 # Naive diagnostic thresholds
 gr_alpha_values = Float64[0.001, 0.005, 0.01, 0.02, 0.05, 0.1]
 w1_alpha_values = Float64[0.01, 0.05, 0.1, 0.2, 0.3, 0.5]
+tv_alpha_values = Float64[0.01, 0.02, 0.05, 0.1, 0.2, 0.5]
 
 # Build potential_kwargs from CLI overrides (only include what was specified)
 potential_kwargs_dict = Dict{Symbol,Any}()
@@ -146,7 +147,7 @@ println("Output prefix: $(outprefix)")
 function evaluate_grid(model, rng;
                        stride_values, Nreplicas_values,
                        num_batches, npot_per_batch, ntrace_per_pot,
-                       alpha_values, gr_alpha_values, w1_alpha_values,
+                       alpha_values, gr_alpha_values, w1_alpha_values, tv_alpha_values,
                        time_bins, nbins_time, ncorr,
                        detect_bins, nbins_detect,
                        input_dim=64, βlims=(1.0, 3.0),
@@ -158,6 +159,7 @@ function evaluate_grid(model, rng;
     na = length(alpha_values)
     na_gr = length(gr_alpha_values)
     na_w1 = length(w1_alpha_values)
+    na_tv = length(tv_alpha_values)
 
     # --- NN accumulators ---
     tp_grid = zeros(Int, ns, nn, na)
@@ -204,11 +206,37 @@ function evaluate_grid(model, rng;
 
     w1_detect_hist = zeros(Int, nbins_detect, na_w1)
 
+    # --- Oracle (TV from QSD) accumulators ---
+    tv_tp_grid = zeros(Int, ns, nn, na_tv)
+    tv_fp_grid = zeros(Int, ns, nn, na_tv)
+    tv_tn_grid = zeros(Int, ns, nn, na_tv)
+    tv_fn_grid = zeros(Int, ns, nn, na_tv)
+
+    tv_acc_numer = zeros(nbins_time, na_tv)
+    tv_fpr_numer = zeros(nbins_time, na_tv)
+    tv_fnr_numer = zeros(nbins_time, na_tv)
+
+    tv_roc_samples = [Tuple{Float32,Float32}[] for _ in 1:ns, _ in 1:nn]
+    tv_roc_samples_all = Tuple{Float32,Float32}[]
+
+    tv_detect_hist = zeros(Int, nbins_detect, na_tv)
+
     # --- Per-cell trajectory and detection counts (for trigger/failure rates) ---
     traj_count_grid = zeros(Int, ns, nn)
     detect_count_grid    = zeros(Int, ns, nn, na)
     gr_detect_count_grid = zeros(Int, ns, nn, na_gr)
     w1_detect_count_grid = zeros(Int, ns, nn, na_w1)
+    tv_detect_count_grid = zeros(Int, ns, nn, na_tv)
+
+    # --- TV at detection time accumulators ---
+    nn_tv_at_detect_sum   = zeros(ns, nn, na)
+    nn_tv_at_detect_count = zeros(Int, ns, nn, na)
+    gr_tv_at_detect_sum   = zeros(ns, nn, na_gr)
+    gr_tv_at_detect_count = zeros(Int, ns, nn, na_gr)
+    w1_tv_at_detect_sum   = zeros(ns, nn, na_w1)
+    w1_tv_at_detect_count = zeros(Int, ns, nn, na_w1)
+    tv_tv_at_detect_sum   = zeros(ns, nn, na_tv)
+    tv_tv_at_detect_count = zeros(Int, ns, nn, na_tv)
 
     # --- Shared time-resolved denominators ---
     acc_denom = zeros(nbins_time)
@@ -252,6 +280,7 @@ function evaluate_grid(model, rng;
                         prob = Yhat_prob[k, j]
                         gr_val = X_naive[1, k, j]
                         w1_val = X_naive[2, k, j]
+                        tv_val = X_naive[3, k, j]
                         true_pos = Y[k, j] == 1.0f0
                         tbin = get_bin(k / decorr_step, first(time_bins), last(time_bins), nbins_time)
 
@@ -328,6 +357,28 @@ function evaluate_grid(model, rng;
                                 w1_fnr_numer[tbin, ai] += !pred_pos ? 1 : 0
                             end
                         end
+
+                        # Oracle (TV from QSD): small → converged
+                        for (ai, th) in enumerate(tv_alpha_values)
+                            pred_pos = tv_val < th
+
+                            if pred_pos && true_pos
+                                tv_tp_grid[si, ni, ai] += 1
+                            elseif pred_pos && !true_pos
+                                tv_fp_grid[si, ni, ai] += 1
+                            elseif !pred_pos && true_pos
+                                tv_fn_grid[si, ni, ai] += 1
+                            else
+                                tv_tn_grid[si, ni, ai] += 1
+                            end
+
+                            tv_acc_numer[tbin, ai] += (pred_pos == true_pos) ? 1 : 0
+                            if !true_pos
+                                tv_fpr_numer[tbin, ai] += pred_pos ? 1 : 0
+                            else
+                                tv_fnr_numer[tbin, ai] += !pred_pos ? 1 : 0
+                            end
+                        end
                     end
 
                     # ROC: one independent sample per trajectory (between 0 and 2*tcorr)
@@ -342,12 +393,15 @@ function evaluate_grid(model, rng;
                     # Naive ROC: negate scores so compute_roc (uses >) works
                     gr_score = -Float32(X_naive[1, k_roc, j])
                     w1_score = -Float32(X_naive[2, k_roc, j])
+                    tv_score = -Float32(X_naive[3, k_roc, j])
                     push!(gr_roc_samples[si, ni], (gr_score, true_label))
                     push!(gr_roc_samples_all, (gr_score, true_label))
                     push!(w1_roc_samples[si, ni], (w1_score, true_label))
                     push!(w1_roc_samples_all, (w1_score, true_label))
+                    push!(tv_roc_samples[si, ni], (tv_score, true_label))
+                    push!(tv_roc_samples_all, (tv_score, true_label))
 
-                    # NN detection time
+                    # NN detection time + TV at detection
                     for (ai, α) in enumerate(alpha_values)
                         detect_frame = findfirst(>(α), @view Yhat_prob[1:traj_len, j])
                         if detect_frame !== nothing
@@ -355,10 +409,12 @@ function evaluate_grid(model, rng;
                             ratio = detect_frame / decorr_step
                             tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
                             detect_hist[tbin, ai] += 1
+                            nn_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[3, detect_frame, j])
+                            nn_tv_at_detect_count[si, ni, ai] += 1
                         end
                     end
 
-                    # GR detection time
+                    # GR detection time + TV at detection
                     for (ai, th) in enumerate(gr_alpha_values)
                         detect_frame = findfirst(<(th), @view X_naive[1, 1:traj_len, j])
                         if detect_frame !== nothing
@@ -366,10 +422,12 @@ function evaluate_grid(model, rng;
                             ratio = detect_frame / decorr_step
                             tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
                             gr_detect_hist[tbin, ai] += 1
+                            gr_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[3, detect_frame, j])
+                            gr_tv_at_detect_count[si, ni, ai] += 1
                         end
                     end
 
-                    # W1 detection time
+                    # W1 detection time + TV at detection
                     for (ai, th) in enumerate(w1_alpha_values)
                         detect_frame = findfirst(<(th), @view X_naive[2, 1:traj_len, j])
                         if detect_frame !== nothing
@@ -377,6 +435,21 @@ function evaluate_grid(model, rng;
                             ratio = detect_frame / decorr_step
                             tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
                             w1_detect_hist[tbin, ai] += 1
+                            w1_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[3, detect_frame, j])
+                            w1_tv_at_detect_count[si, ni, ai] += 1
+                        end
+                    end
+
+                    # Oracle (TV) detection time + TV at detection
+                    for (ai, th) in enumerate(tv_alpha_values)
+                        detect_frame = findfirst(<(th), @view X_naive[3, 1:traj_len, j])
+                        if detect_frame !== nothing
+                            tv_detect_count_grid[si, ni, ai] += 1
+                            ratio = detect_frame / decorr_step
+                            tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
+                            tv_detect_hist[tbin, ai] += 1
+                            tv_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[3, detect_frame, j])
+                            tv_tv_at_detect_count[si, ni, ai] += 1
                         end
                     end
                 end
@@ -404,6 +477,18 @@ function evaluate_grid(model, rng;
     w1_fpr_grid = w1_fp_grid ./ max.(w1_fp_grid .+ w1_tn_grid, 1)
     w1_fnr_grid = w1_fn_grid ./ max.(w1_fn_grid .+ w1_tp_grid, 1)
 
+    # --- Oracle (TV) derived grid metrics ---
+    tv_total = tv_tp_grid .+ tv_fp_grid .+ tv_tn_grid .+ tv_fn_grid
+    tv_acc_grid = (tv_tp_grid .+ tv_tn_grid) ./ max.(tv_total, 1)
+    tv_fpr_grid = tv_fp_grid ./ max.(tv_fp_grid .+ tv_tn_grid, 1)
+    tv_fnr_grid = tv_fn_grid ./ max.(tv_fn_grid .+ tv_tp_grid, 1)
+
+    # --- TV at detection: mean per method ---
+    nn_tv_at_detect = nn_tv_at_detect_sum ./ max.(nn_tv_at_detect_count, 1)
+    gr_tv_at_detect = gr_tv_at_detect_sum ./ max.(gr_tv_at_detect_count, 1)
+    w1_tv_at_detect = w1_tv_at_detect_sum ./ max.(w1_tv_at_detect_count, 1)
+    tv_tv_at_detect = tv_tv_at_detect_sum ./ max.(tv_tv_at_detect_count, 1)
+
     # --- NN per-cell AUC ---
     auc_grid = zeros(ns, nn)
     roc_per_cell = Matrix{Any}(undef, ns, nn)
@@ -421,11 +506,13 @@ function evaluate_grid(model, rng;
         end
     end
 
-    # --- GR/W1 per-cell AUC ---
+    # --- GR/W1/TV per-cell AUC ---
     gr_auc_grid = zeros(ns, nn)
     w1_auc_grid = zeros(ns, nn)
+    tv_auc_grid = zeros(ns, nn)
     gr_roc_thresholds = collect(-0.2f0:0.002f0:0.0f0)
     w1_roc_thresholds = collect(-1.0f0:0.005f0:0.0f0)
+    tv_roc_thresholds = collect(-2.0f0:0.01f0:0.0f0)
 
     for si in 1:ns, ni in 1:nn
         gr_s = gr_roc_samples[si, ni]
@@ -441,12 +528,20 @@ function evaluate_grid(model, rng;
         else
             w1_auc_grid[si, ni] = NaN
         end
+
+        tv_s = tv_roc_samples[si, ni]
+        if length(tv_s) > 0
+            tv_auc_grid[si, ni] = compute_roc([s[1] for s in tv_s], [s[2] for s in tv_s]; thresholds=tv_roc_thresholds).auc
+        else
+            tv_auc_grid[si, ni] = NaN
+        end
     end
 
     # --- Global ROC ---
     global_roc = compute_roc([s[1] for s in roc_samples_all], [s[2] for s in roc_samples_all])
     gr_global_roc = compute_roc([s[1] for s in gr_roc_samples_all], [s[2] for s in gr_roc_samples_all]; thresholds=gr_roc_thresholds)
     w1_global_roc = compute_roc([s[1] for s in w1_roc_samples_all], [s[2] for s in w1_roc_samples_all]; thresholds=w1_roc_thresholds)
+    tv_global_roc = compute_roc([s[1] for s in tv_roc_samples_all], [s[2] for s in tv_roc_samples_all]; thresholds=tv_roc_thresholds)
 
     # --- Time-resolved rates ---
     acc_time = acc_numer ./ max.(acc_denom, 1)
@@ -461,6 +556,10 @@ function evaluate_grid(model, rng;
     w1_fpr_time = w1_fpr_numer ./ max.(fpr_denom, 1)
     w1_fnr_time = w1_fnr_numer ./ max.(fnr_denom, 1)
 
+    tv_acc_time = tv_acc_numer ./ max.(acc_denom, 1)
+    tv_fpr_time = tv_fpr_numer ./ max.(fpr_denom, 1)
+    tv_fnr_time = tv_fnr_numer ./ max.(fnr_denom, 1)
+
     # AUC statistics
     valid_aucs = filter(!isnan, vec(auc_grid))
     mean_auc = isempty(valid_aucs) ? NaN : mean(valid_aucs)
@@ -473,6 +572,10 @@ function evaluate_grid(model, rng;
     w1_valid_aucs = filter(!isnan, vec(w1_auc_grid))
     w1_mean_auc = isempty(w1_valid_aucs) ? NaN : mean(w1_valid_aucs)
     w1_std_auc  = isempty(w1_valid_aucs) ? NaN : std(w1_valid_aucs)
+
+    tv_valid_aucs = filter(!isnan, vec(tv_auc_grid))
+    tv_mean_auc = isempty(tv_valid_aucs) ? NaN : mean(tv_valid_aucs)
+    tv_std_auc  = isempty(tv_valid_aucs) ? NaN : std(tv_valid_aucs)
 
     return (
         # NN grid metrics
@@ -533,11 +636,36 @@ function evaluate_grid(model, rng;
         w1_mean_auc = w1_mean_auc,
         w1_std_auc = w1_std_auc,
 
+        # Oracle (TV) grid metrics
+        tv_acc_grid = tv_acc_grid,
+        tv_fpr_grid = tv_fpr_grid,
+        tv_fnr_grid = tv_fnr_grid,
+        tv_auc_grid = tv_auc_grid,
+        # Oracle time-resolved
+        tv_acc_time = tv_acc_time,
+        tv_fpr_time = tv_fpr_time,
+        tv_fnr_time = tv_fnr_time,
+        # Oracle detection time
+        tv_detect_hist = tv_detect_hist,
+        # Oracle ROC
+        tv_roc_fpr = tv_global_roc.fpr,
+        tv_roc_tpr = tv_global_roc.tpr,
+        tv_global_auc = tv_global_roc.auc,
+        tv_mean_auc = tv_mean_auc,
+        tv_std_auc = tv_std_auc,
+
+        # TV at detection (mean per method per threshold per cell)
+        nn_tv_at_detect = nn_tv_at_detect,
+        gr_tv_at_detect = gr_tv_at_detect,
+        w1_tv_at_detect = w1_tv_at_detect,
+        tv_tv_at_detect = tv_tv_at_detect,
+
         # Trajectory / detection counts
         traj_count_grid       = traj_count_grid,
         detect_count_grid     = detect_count_grid,
         gr_detect_count_grid  = gr_detect_count_grid,
         w1_detect_count_grid  = w1_detect_count_grid,
+        tv_detect_count_grid  = tv_detect_count_grid,
 
         # Shared
         acc_denom = acc_denom,
@@ -549,6 +677,7 @@ function evaluate_grid(model, rng;
         alpha_values     = alpha_values,
         gr_alpha_values  = gr_alpha_values,
         w1_alpha_values  = w1_alpha_values,
+        tv_alpha_values  = tv_alpha_values,
     )
 end
 
@@ -564,6 +693,7 @@ results = evaluate_grid(model, rng;
     alpha_values     = alpha_values,
     gr_alpha_values  = gr_alpha_values,
     w1_alpha_values  = w1_alpha_values,
+    tv_alpha_values  = tv_alpha_values,
     time_bins        = time_bins,
     nbins_time       = nbins_time,
     ncorr            = ncorr,
@@ -635,11 +765,32 @@ json_data = Dict(
     "w1_mean_auc"       => results.w1_mean_auc,
     "w1_std_auc"        => results.w1_std_auc,
     "w1_alpha_values"   => results.w1_alpha_values,
+    # Oracle (TV)
+    "tv_acc_grid"       => results.tv_acc_grid,
+    "tv_fpr_grid"       => results.tv_fpr_grid,
+    "tv_fnr_grid"       => results.tv_fnr_grid,
+    "tv_auc_grid"       => results.tv_auc_grid,
+    "tv_acc_time"       => results.tv_acc_time,
+    "tv_fpr_time"       => results.tv_fpr_time,
+    "tv_fnr_time"       => results.tv_fnr_time,
+    "tv_detect_hist"    => results.tv_detect_hist,
+    "tv_roc_fpr"        => results.tv_roc_fpr,
+    "tv_roc_tpr"        => results.tv_roc_tpr,
+    "tv_global_auc"     => results.tv_global_auc,
+    "tv_mean_auc"       => results.tv_mean_auc,
+    "tv_std_auc"        => results.tv_std_auc,
+    "tv_alpha_values"   => results.tv_alpha_values,
+    # TV at detection
+    "nn_tv_at_detect"   => results.nn_tv_at_detect,
+    "gr_tv_at_detect"   => results.gr_tv_at_detect,
+    "w1_tv_at_detect"   => results.w1_tv_at_detect,
+    "tv_tv_at_detect"   => results.tv_tv_at_detect,
     # Trajectory / detection counts
     "traj_count_grid"       => results.traj_count_grid,
     "detect_count_grid"     => results.detect_count_grid,
     "gr_detect_count_grid"  => results.gr_detect_count_grid,
     "w1_detect_count_grid"  => results.w1_detect_count_grid,
+    "tv_detect_count_grid"  => results.tv_detect_count_grid,
 )
 
 open("$(outprefix)_benchmark_results.json", "w") do f
