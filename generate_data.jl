@@ -476,21 +476,21 @@ function get_batch(rng;
                 # Append metadata scalars to every frame
                 if n_meta == 2
                     N_actual  = Nreplicas * stride
-                    meta_vals = Float32.([N_actual, sqrt(N_actual * dt)])
+                    meta_vals = Float32.([N_actual, 1/sqrt(N_actual * dt)])
                     features  = [vcat(f, meta_vals) for f in features]
                 else   # n_meta == 1 — legacy single scalar, backward-compatible
-                    meta_val = Float32(sqrt(Nreplicas * stride * dt))
+                    meta_val = Float32(1/sqrt(Nreplicas * stride * dt))
                     features = [vcat(f, [meta_val]) for f in features]
                 end
 
                 full_labels = (1:l) .* (stride * dt) .> T_conv
 
                 for k = 1:ncut
-                    # Start-anchored, uniformly-sampled length: keeps positive-label
-                    # fraction distribution constant across batches
-                    α_min = min_length / l
-                    α     = α_min + rand(rng) * (1.0 - α_min)
-                    len   = clamp(round(Int, α * l), min_length, l)
+                    # Cut between t_corr and ncorr*t_corr: ensures every subsequence
+                    # contains the transition AND a block of positive frames after it,
+                    # so the model learns to output high confidence post-convergence.
+                    decorr_frame = max(min_length, ceil(Int, T_conv / (stride * dt)))
+                    len = clamp(rand(rng, decorr_frame:l), min_length, l)
                     push!(batch, features[1:len])
                     push!(naive_batch, naive_features[1:len])
                     push!(labels, Float32.(full_labels[1:len]))

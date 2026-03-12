@@ -204,6 +204,12 @@ function evaluate_grid(model, rng;
 
     w1_detect_hist = zeros(Int, nbins_detect, na_w1)
 
+    # --- Per-cell trajectory and detection counts (for trigger/failure rates) ---
+    traj_count_grid = zeros(Int, ns, nn)
+    detect_count_grid    = zeros(Int, ns, nn, na)
+    gr_detect_count_grid = zeros(Int, ns, nn, na_gr)
+    w1_detect_count_grid = zeros(Int, ns, nn, na_w1)
+
     # --- Shared time-resolved denominators ---
     acc_denom = zeros(nbins_time)
     fpr_denom = zeros(nbins_time)
@@ -239,6 +245,8 @@ function evaluate_grid(model, rng;
 
                     decorr_step = findfirst(==(1.0f0), Y[:, j])
                     decorr_step === nothing && continue
+
+                    traj_count_grid[si, ni] += 1
 
                     for k in 1:traj_len
                         prob = Yhat_prob[k, j]
@@ -343,6 +351,7 @@ function evaluate_grid(model, rng;
                     for (ai, α) in enumerate(alpha_values)
                         detect_frame = findfirst(>(α), @view Yhat_prob[1:traj_len, j])
                         if detect_frame !== nothing
+                            detect_count_grid[si, ni, ai] += 1
                             ratio = detect_frame / decorr_step
                             tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
                             detect_hist[tbin, ai] += 1
@@ -353,6 +362,7 @@ function evaluate_grid(model, rng;
                     for (ai, th) in enumerate(gr_alpha_values)
                         detect_frame = findfirst(<(th), @view X_naive[1, 1:traj_len, j])
                         if detect_frame !== nothing
+                            gr_detect_count_grid[si, ni, ai] += 1
                             ratio = detect_frame / decorr_step
                             tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
                             gr_detect_hist[tbin, ai] += 1
@@ -363,6 +373,7 @@ function evaluate_grid(model, rng;
                     for (ai, th) in enumerate(w1_alpha_values)
                         detect_frame = findfirst(<(th), @view X_naive[2, 1:traj_len, j])
                         if detect_frame !== nothing
+                            w1_detect_count_grid[si, ni, ai] += 1
                             ratio = detect_frame / decorr_step
                             tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
                             w1_detect_hist[tbin, ai] += 1
@@ -522,6 +533,12 @@ function evaluate_grid(model, rng;
         w1_mean_auc = w1_mean_auc,
         w1_std_auc = w1_std_auc,
 
+        # Trajectory / detection counts
+        traj_count_grid       = traj_count_grid,
+        detect_count_grid     = detect_count_grid,
+        gr_detect_count_grid  = gr_detect_count_grid,
+        w1_detect_count_grid  = w1_detect_count_grid,
+
         # Shared
         acc_denom = acc_denom,
         fpr_denom = fpr_denom,
@@ -618,6 +635,11 @@ json_data = Dict(
     "w1_mean_auc"       => results.w1_mean_auc,
     "w1_std_auc"        => results.w1_std_auc,
     "w1_alpha_values"   => results.w1_alpha_values,
+    # Trajectory / detection counts
+    "traj_count_grid"       => results.traj_count_grid,
+    "detect_count_grid"     => results.detect_count_grid,
+    "gr_detect_count_grid"  => results.gr_detect_count_grid,
+    "w1_detect_count_grid"  => results.w1_detect_count_grid,
 )
 
 open("$(outprefix)_benchmark_results.json", "w") do f
