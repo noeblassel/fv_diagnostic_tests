@@ -194,7 +194,9 @@ function freeze_thaw_bo_search(build_run, lb, ub;
         rng             = Xoshiro(42),
         config_key      = nothing,   # x -> comparable key; nothing = no dedup
         prefix          = "",
-        checkpoint_path = nothing)
+        checkpoint_path = nothing,
+        patience        = 100,       # early-stop if no improvement for this many iters
+        n_warmup_epochs = 3)         # warmup epochs for new configs before entering pool
 
     d = length(lb)
 
@@ -215,8 +217,13 @@ function freeze_thaw_bo_search(build_run, lb, ub;
     function eval_chunk!(run)
         println("Evaluating run with model: $(repr("text/plain",run.model))")
 
-        if n_params(run.model) > NPARAMS_MAX
-            println("Exceeded max number of parameters")
+        np = n_params(run.model)
+        if np > NPARAMS_MAX
+            println("Exceeded max number of parameters ($np > $NPARAMS_MAX)")
+            return 1.f0 # upper bound on loss
+        end
+        if np < NPARAMS_MIN
+            println("Below min number of parameters ($np < $NPARAMS_MIN)")
             return 1.f0 # upper bound on loss
         end
 
@@ -227,14 +234,20 @@ function freeze_thaw_bo_search(build_run, lb, ub;
         return result.loss
     end
 
-    # Build a fresh config, run its first chunk, add it to the pool
+    # Build a fresh config, run warmup epochs, add it to the pool
     function launch_config!(x)
         call_count[] += 1
         run  = build_run(x, call_count[])
-        loss = eval_chunk!(run)
+        ts   = Int[]
+        losses = Float64[]
+        for e in 1:n_warmup_epochs
+            loss = eval_chunk!(run)
+            push!(ts, e)
+            push!(losses, loss)
+        end
         key  = config_key !== nothing ? config_key(x) : nothing
-        push!(pool, FrozenConfig(copy(x), run, [1], [loss], key))
-        return loss
+        push!(pool, FrozenConfig(copy(x), run, ts, losses, key))
+        return losses[end]
     end
 
     # ── Initialisation: n_init random configs ────────────────────────────────
@@ -247,11 +260,14 @@ function freeze_thaw_bo_search(build_run, lb, ub;
             match_idx = findfirst(j -> pool[j].config_key == key &&
                                        maximum(pool[j].ts) < T_final, 1:length(pool))
             if match_idx !== nothing
-                cfg    = pool[match_idx]
-                t_next = maximum(cfg.ts) + 1
-                loss   = eval_chunk!(cfg.run)
-                push!(cfg.ts, t_next); push!(cfg.losses, loss)
-                println("  init $i/$n_init  DUPLICATE→THAW pool[$match_idx]  loss=$(round(loss; digits=4))")
+                cfg = pool[match_idx]
+                for _ in 1:n_warmup_epochs
+                    t_next = maximum(cfg.ts) + 1
+                    t_next > T_final && break
+                    loss   = eval_chunk!(cfg.run)
+                    push!(cfg.ts, t_next); push!(cfg.losses, loss)
+                end
+                println("  init $i/$n_init  DUPLICATE→THAW pool[$match_idx]  loss=$(round(cfg.losses[end]; digits=4))")
                 flush(stdout)
                 continue
             end
@@ -263,6 +279,9 @@ function freeze_thaw_bo_search(build_run, lb, ub;
     end
 
     # ── Sequential acquisition loop ──────────────────────────────────────────
+    best_observed_loss     = minimum(minimum(cfg.losses) for cfg in pool)
+    iters_without_improvement = 0
+
     for iter in 1:n_iter
 
         # Collect all (x, t, loss) observations into flat vectors
@@ -359,6 +378,19 @@ function freeze_thaw_bo_search(build_run, lb, ub;
                           model_state=Flux.state(cfg.run.model)) for cfg in pool]
             JLD2.jldsave(checkpoint_path; pool=pool_ckpt, iter=iter)
         end
+
+        # ── Early stopping ────────────────────────────────────────────────
+        current_best = minimum(minimum(cfg.losses) for cfg in pool)
+        if best_observed_loss - current_best > 1e-4
+            best_observed_loss        = current_best
+            iters_without_improvement = 0
+        else
+            iters_without_improvement += 1
+        end
+        if iters_without_improvement >= patience
+            println("  [FTBO] Early stopping at iter $iter ($patience iters without improvement)")
+            break
+        end
     end
 
     best_cfg = argmin(cfg -> minimum(cfg.losses), pool)
@@ -383,6 +415,7 @@ const STRIDE_LIMS    = (10, 200)
 const NREPLICAS_LIMS = (10, 200)
 
 const NPARAMS_MAX = 500_000 # clamp to 500K parameter models
+const NPARAMS_MIN = 20_000  # reject tiny models that learn fast but plateau early
 
 # ============================================================
 # Decode helpers  (x -> lr, hyperparams)
@@ -390,12 +423,12 @@ const NPARAMS_MAX = 500_000 # clamp to 500K parameter models
 
 # x[1]: log(lr)         [log(1e-4), log(1e-2)]
 # x[2]: rnn_depth       [0.5, 2.5]  → 1 or 2
-# x[3]: rnn_width_exp   [4.5, 7.5]  → 5 to 7
+# x[3]: rnn_width_exp   [4.5, 6.5]  → 5 or 6  (32 or 64)
 # x[4]: mlp_depth       [0.5, 2.5]  → 1 or 2
-# x[5]: mlp_width_exp   [4.5, 7.5]  → 5 to 7
+# x[5]: mlp_width_exp   [4.5, 6.5]  → 5 or 6  (32 or 64)
 # CNN x[6]: cnn_depth   [2.5, 5.5]  → 3 to 5  (clamped to input_dim_exp)
-# CNN x[7]: cnn_width   [2.5, 4.5]  → 3 to 5
-# CNN x[8]: input_dim_exp [3.5, 7.5] → 4 to 7  (16, 32, 64, or 128 bins)
+# CNN x[7]: cnn_width   [2.5, 4.5]  → 3 or 4  (8 or 16 channels)
+# CNN x[8]: input_dim_exp [4.5, 8.5] → 5 to 8  (32, 64, 128, or 256 bins)
 # Constraint: cnn_depth ≤ input_dim_exp  (depth d MaxPool(2) layers require input_dim ≥ 2^d)
 
 function decode_cnn(x)
@@ -518,7 +551,7 @@ end
 const MODEL_ARG = get(ARGS, 1, "cnn")
 MODEL_ARG in ("cnn", "frnn") || error("Usage: julia tune_ftbo.jl [cnn|frnn]")
 
-println("\n=== $(uppercase(MODEL_ARG)) Freeze-Thaw BO (8 dims, n_init=10, n_iter=500) ===")
+println("\n=== $(uppercase(MODEL_ARG)) Freeze-Thaw BO (8 dims, n_init=10, n_iter=200) ===")
 
 _build_run   = MODEL_ARG == "cnn" ? make_build_run_cnn()  : make_build_run_frnn()
 _config_key  = MODEL_ARG == "cnn" ? cnn_config_key        : frnn_config_key
@@ -530,21 +563,21 @@ _results_out = joinpath(@__DIR__, "ftbo_results_$(MODEL_ARG).jld2")
 
 
 # x[1]: log(lr)         [log(1e-4), log(1e-2)]
-# x[2]: rnn_depth       [0.5, 3.5]  → 1 to 3
-# x[3]: rnn_width_exp   [3.5, 7.5]  → 4 to 7
+# x[2]: rnn_depth       [0.5, 2.5]  → 1 or 2
+# x[3]: rnn_width_exp   [4.5, 6.5]  → 5 or 6  (32 or 64)
 # x[4]: mlp_depth       [0.5, 2.5]  → 1 or 2
-# x[5]: mlp_width_exp   [3.5, 7.5]  → 4 to 7
-# CNN x[6]: cnn_depth   [1.5, 5.5]  → 2 to 5  (clamped to input_dim_exp)
-# CNN x[7]: cnn_width   [2.5, 7.5]  → 3 to 7
-# CNN x[8]: input_dim_exp [3.5, 7.5] → 4 to 7  (16, 32, 64, or 128 bins)
+# x[5]: mlp_width_exp   [4.5, 6.5]  → 5 or 6  (32 or 64)
+# CNN x[6]: cnn_depth   [2.5, 5.5]  → 3 to 5  (clamped to input_dim_exp)
+# CNN x[7]: cnn_width   [2.5, 4.5]  → 3 or 4  (8 or 16 channels)
+# CNN x[8]: input_dim_exp [4.5, 8.5] → 5 to 8  (32, 64, 128, or 256 bins)
 # Constraint: cnn_depth ≤ input_dim_exp  (depth d MaxPool(2) layers require input_dim ≥ 2^d)
 
 result = freeze_thaw_bo_search(
     _build_run,
-    [log(1e-4), 0.5, 3.5, 0.5, 3.5, 1.5, 2.5, 3.5],
-    [log(1e-1), 3.5, 7.5, 2.5, 7.5, 5.5, 7.5, 7.5];
+    [log(1e-4), 0.5, 4.5, 0.5, 4.5, 2.5, 2.5, 4.5],
+    [log(1e-2), 2.5, 6.5, 2.5, 6.5, 5.5, 4.5, 8.5];
     n_init          = 10,
-    n_iter          = 500,
+    n_iter          = 200,
     T_final         = T_FINAL,
     rng             = Xoshiro(_rng_seed),
     config_key      = _config_key,
