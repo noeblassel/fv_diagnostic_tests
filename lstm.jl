@@ -208,15 +208,32 @@ function load_rnn_from_state(input_dim, state)
         feat_state = state.featurizer
         kernel_widths = [size(l.weight, 1) for l in feat_state.encoder.layers[1:2:end]]
         nchannels = [size(l.bias, 1) for l in feat_state.encoder.layers[1:2:end]]
-        featurizer = CNNFeaturizer(; input_dim=input_dim, kernel_dims=kernel_widths, nchannels=nchannels)
 
         rnn_widths = [size(l.cell.Wh, 2) for l in state.rnn.layers]
         mlp_widths = [size(l.bias, 1) for l in state.mlp_head.layers]
         pop!(mlp_widths)
 
+        # Infer correct input_dim from the LSTM input weight dimensions.
+        # Each Conv(same-pad) + MaxPool(2) layer halves the spatial dim,
+        # so output_dim = (input_dim ÷ 2^depth) * nchannels[end].
+        # lstm_input_size = output_dim + n_meta.
         lstm_input_size = size(state.rnn.layers[1].cell.Wi, 2)
-        n_meta = lstm_input_size - featurizer.output_dim
+        depth = length(nchannels)
+        n_meta = -1
+        for n_meta_try in (1, 0)
+            target = lstm_input_size - n_meta_try
+            inferred = target * 2^depth ÷ nchannels[end]
+            if inferred > 0 && ispow2(inferred) &&
+               (inferred ÷ 2^depth) * nchannels[end] == target
+                input_dim = inferred
+                n_meta = n_meta_try
+                break
+            end
+        end
+        n_meta >= 0 || error("Could not infer input_dim / n_meta from saved state " *
+                             "(lstm_input=$lstm_input_size, depth=$depth, last_ch=$(nchannels[end]))")
 
+        featurizer = CNNFeaturizer(; input_dim=input_dim, kernel_dims=kernel_widths, nchannels=nchannels)
         model = RNNDiagnostic(featurizer; dims_rnn=rnn_widths, dims_mlp=mlp_widths, n_meta=n_meta)
         Flux.loadmodel!(model.featurizer, state.featurizer)
         Flux.loadmodel!(model.rnn, state.rnn)
@@ -238,7 +255,7 @@ function load_rnn_from_state(input_dim, state)
         Flux.loadmodel!(model.mlp_head, state.mlp_head)
     end
 
-    return model
+    return model, input_dim
 end
 
 
