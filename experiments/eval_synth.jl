@@ -26,10 +26,9 @@ rseed = 2027
 rng = Xoshiro(rseed)
 model_state = JLD2.load("$(prefix).jld2", "model_state")
 
-input_dim = 64
 βlims = (1.0,3.0) # temperature range
 
-model = load_rnn_from_state(input_dim,model_state)
+model, input_dim = load_rnn_from_state(64, model_state)
 testmode!(model)
 
 function eval_metrics(model;

@@ -82,8 +82,7 @@ if haskey(ckpt, "hp")
     model = RNNDiagnostic(hp; n_meta=1, rng=Xoshiro(rseed))
     Flux.loadmodel!(model, state)
 else
-    input_dim = 64
-    model = load_rnn_from_state(input_dim, state)
+    model, input_dim = load_rnn_from_state(64, state)
 end
 
 testmode!(model)
