@@ -259,6 +259,7 @@ function evaluate_grid(model, rng;
                     feature=hist_feature,
                     βlims=βlims,
                     tol=tol, Ngrid=Ngrid, dt=dt,
+                    true_tv=true,
                     potential_kwargs=potential_kwargs)
 
                 Flux.reset!(model)
@@ -408,7 +409,7 @@ function evaluate_grid(model, rng;
                             ratio = detect_frame / decorr_step
                             tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
                             detect_hist[tbin, ai] += 1
-                            nn_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[3, detect_frame, j])
+                            nn_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[4, detect_frame, j])
                             nn_tv_at_detect_count[si, ni, ai] += 1
                         end
                     end
@@ -421,7 +422,7 @@ function evaluate_grid(model, rng;
                             ratio = detect_frame / decorr_step
                             tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
                             gr_detect_hist[tbin, ai] += 1
-                            gr_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[3, detect_frame, j])
+                            gr_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[4, detect_frame, j])
                             gr_tv_at_detect_count[si, ni, ai] += 1
                         end
                     end
@@ -434,7 +435,7 @@ function evaluate_grid(model, rng;
                             ratio = detect_frame / decorr_step
                             tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
                             w1_detect_hist[tbin, ai] += 1
-                            w1_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[3, detect_frame, j])
+                            w1_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[4, detect_frame, j])
                             w1_tv_at_detect_count[si, ni, ai] += 1
                         end
                     end
@@ -447,7 +448,7 @@ function evaluate_grid(model, rng;
                             ratio = detect_frame / decorr_step
                             tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
                             tv_detect_hist[tbin, ai] += 1
-                            tv_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[3, detect_frame, j])
+                            tv_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[4, detect_frame, j])
                             tv_tv_at_detect_count[si, ni, ai] += 1
                         end
                     end

@@ -368,11 +368,11 @@ A tuple `(X, Y, mask)` where:
 function get_batch(rng;
     tol=0.05,
     Ngrid=100,
-    βlims=(1.0,1.0),
+    βlims=(1.0,3.0),
     dt=1e-3,
     tau_gt::Float64=0.1,
-    stride_lims::Tuple{Int,Int}=(50,50),
-    Nreplicas_lims::Tuple{Int,Int}=(50,50),
+    stride_lims::Tuple{Int,Int}=(10,200),
+    Nreplicas_lims::Tuple{Int,Int}=(10,200),
     input_dim=64,
     feature::Function=hist_feature,
     n_meta::Int=1,
@@ -382,6 +382,7 @@ function get_batch(rng;
     min_length=5,
     ncorr=2,
     max_attempts::Int=10,
+    true_tv::Bool=false,
     potential_kwargs::NamedTuple=NamedTuple())
 
     batch = Vector{Vector{Float32}}[]
@@ -399,7 +400,8 @@ function get_batch(rng;
         L = comp_generator(W, D, β, Ngrid) # killed generator, Ngrid×Ngrid
         ν, gap = comp_qsd(W, β, L)
 
-        P_gt = exp(-tau_gt * Matrix(L)) # killed semigroup at lag time tau_gt -- minus sign because comp_generator returns the negative generator
+        L_dense = Matrix(L)
+        P_gt = exp(-tau_gt * L_dense) # killed semigroup at lag time tau_gt -- minus sign because comp_generator returns the negative generator
 
         potential_failed = false   # flag to skip to next potential if too many failures
 
@@ -408,6 +410,11 @@ function get_batch(rng;
         trace_strides   = rand(rng, stride_lims[1]:stride_lims[2], ntrace)
         trace_Nreplicas = rand(rng, Nreplicas_lims[1]:Nreplicas_lims[2], ntrace)
         trace_ixs       = rand(rng, 1:Ngrid, ntrace)
+
+        if true_tv
+            unique_strides = unique(trace_strides)
+            P_frame_dict = Dict(s => exp(-s * dt * L_dense) for s in unique_strides)
+        end
 
         trace_results = Vector{Any}(undef, ntrace)
 
@@ -452,6 +459,12 @@ function get_batch(rng;
                 ix_j = rand(local_rng, 1:Ngrid)
             end
 
+            local_true_tv_trace = nothing
+            if true_tv && success
+                nframes = length(local_fv.fv_frames)
+                local_true_tv_trace = tv_trace(P_frame_dict[stride_j], ν, ix_j; tv_tol=-1.0, maxiter=nframes + 1)
+            end
+
             trace_results[j] = success ? (
                 fv_frames      = local_fv.fv_frames,
                 gr_history     = local_fv.gr_history,
@@ -460,6 +473,7 @@ function get_batch(rng;
                 stride         = stride_j,
                 decorr_step_gt = decorr_step_gt,
                 T_conv         = T_conv,
+                true_tv_trace  = local_true_tv_trace,
                 success        = true,
             ) : (success = false,)
         end
@@ -489,7 +503,12 @@ function get_batch(rng;
                 end
                 for k = 1:length(gr_hist)
                     tv_k = compute_tv_from_qsd(fv_frames[k], ν, Ngrid)
-                    push!(naive_features, Float32.([gr_hist[k], w1_hist[k], tv_k]))
+                    if true_tv
+                        true_tv_k = Float32(r.true_tv_trace[k + 1]) # k+1: errs[1] is time 0, errs[k+1] is frame k
+                        push!(naive_features, Float32.([gr_hist[k], w1_hist[k], tv_k, true_tv_k]))
+                    else
+                        push!(naive_features, Float32.([gr_hist[k], w1_hist[k], tv_k]))
+                    end
                 end
 
                 # Append metadata scalars to every frame
@@ -537,7 +556,8 @@ function get_batch(rng;
     p = randperm(rng, nsamples)
 
     batch_X = batchseq(view(batch, p), zeros(Float32, input_dim + n_meta))
-    batch_N = batchseq(view(naive_batch, p), zeros(Float32, 3))
+    n_naive = true_tv ? 4 : 3
+    batch_N = batchseq(view(naive_batch, p), zeros(Float32, n_naive))
     batch_Y = batchseq(view(labels, p), dummy_val)
 
     Y = stack(batch_Y,dims=1)
