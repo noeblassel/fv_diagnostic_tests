@@ -105,9 +105,9 @@ Ngrid            = something(cli_Ngrid, 100)
 dt               = something(cli_dt, 1e-3)
 
 # Naive diagnostic thresholds
-gr_alpha_values = Float64[0.001, 0.005, 0.01, 0.02, 0.05, 0.1]
-w1_alpha_values = Float64[0.01, 0.05, 0.1, 0.2, 0.3, 0.5]
-tv_alpha_values = Float64[0.01, 0.02, 0.05, 0.1, 0.2, 0.5]
+gr_alpha_values = Float64[0.01, 0.02, 0.05, 0.1, 0.15, 0.2]
+w1_alpha_values = Float64[0.01, 0.02, 0.05, 0.1, 0.15, 0.2]
+tv_alpha_values = Float64[0.01, 0.02, 0.05, 0.1, 0.15, 0.2]
 
 # Build potential_kwargs from CLI overrides (only include what was specified)
 potential_kwargs_dict = Dict{Symbol,Any}()
