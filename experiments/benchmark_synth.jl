@@ -207,7 +207,7 @@ function evaluate_grid(model, rng;
         for (ni, N) in enumerate(Nreplicas_values)
             for b in 1:num_batches
                 X, Y, mask, X_naive = get_batch(rng;
-                    input_dim=input_dim, stride_lims=(Int(s), Int(s)), Nreplicas_lims=(Int(N), Int(N)),
+                    input_dim=input_dim, stride_lims=(s, s), Nreplicas_lims=(N, N),
                     ncut=0, ncorr=ncorr, npot=npot_per_batch, ntrace=ntrace_per_pot,
                     feature=hist_feature, βlims=βlims,
                     tol=tol, Ngrid=Ngrid, dt=dt, true_tv=true,
@@ -256,9 +256,9 @@ function evaluate_grid(model, rng;
                     true_label = Y[k_roc, j]
                     for (cfg, acc) in zip(methods, accs)
                         raw = get_method_score(cfg, k_roc, j, Yhat_prob, X_naive)
-                        s = cfg.higher_is_positive ? Float32(raw) : -Float32(raw)
-                        push!(acc.roc_samples[si, ni], (s, true_label))
-                        push!(acc.roc_samples_all, (s, true_label))
+                        roc_s = cfg.higher_is_positive ? Float32(raw) : -Float32(raw)
+                        push!(acc.roc_samples[si, ni], (roc_s, true_label))
+                        push!(acc.roc_samples_all, (roc_s, true_label))
                     end
 
                     # --- Detection time + TV at detection ---
