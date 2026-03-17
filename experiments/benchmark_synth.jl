@@ -207,7 +207,7 @@ function evaluate_grid(model, rng;
         for (ni, N) in enumerate(Nreplicas_values)
             for b in 1:num_batches
                 X, Y, mask, X_naive = get_batch(rng;
-                    input_dim=input_dim, stride_lims=(s, s), Nreplicas_lims=(N, N),
+                    input_dim=input_dim, stride_lims=(Int(s), Int(s)), Nreplicas_lims=(Int(N), Int(N)),
                     ncut=0, ncorr=ncorr, npot=npot_per_batch, ntrace=ntrace_per_pot,
                     feature=hist_feature, βlims=βlims,
                     tol=tol, Ngrid=Ngrid, dt=dt, true_tv=true,
