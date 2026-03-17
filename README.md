@@ -31,11 +31,9 @@ It is therefore of practical importance to explore alternatives to the Gelman-Ru
 |------|-------------|
 | `FVDiagnosticTests.jl` | Module definition and exports |
 | `generate_data.jl` | Synthetic data generation, ground-truth labels, and feature functions |
-| `lstm.jl` | Model architecture: featurizers, `RNNDiagnostic`, `RNNDiagnosticOnline`, hyperparameter structs |
+| `lstm.jl` | Model architecture: `CNNFeaturizer`, `RNNDiagnostic`, `RNNDiagnosticOnline`, hyperparameter structs |
 | `train_lstm.jl` | `TrainingRun` struct and training/evaluation loops |
-| `tournament.jl` | Successive-halving hyperparameter search |
-| `main.jl` | Tournament training entry point |
-| `run_from_checkpoint.jl` | Resumes training on a given model architecture |
+| `retrain.jl` | Retrain a model from a checkpoint |
 
 ### Tests
 
@@ -67,7 +65,7 @@ Each frame (a snapshot of the FV ensemble) is embedded independently by the feat
 
 ### Featurizers
 
-Two featurizer types are available, selected via the `featurizer` field of `RNNDiagnosticHyperParams`.
+The featurizer is selected via the `featurizer` field of `RNNDiagnosticHyperParams`.
 
 #### `CNNFeaturizer`
 
@@ -85,31 +83,11 @@ Controlled by `CNNFeaturizerHyperParams(depth, width_exponent)`:
 - `depth` — number of Conv+MaxPool blocks
 - `width_exponent` — first channel count is `2^width_exponent`, doubling each block
 
-#### `DeepSetFeaturizer`
-
-A permutation-invariant encoder based on Deep Sets [ZKS.al.17]((#refs)), implementing $\rho\!\left(\sum_i \phi(x_i)\right)$ where each $x_i$ is a particle position.
-
-```julia
-DeepSetFeaturizer(; dims_phi, dims_rho, rng)
-```
-
-- **Input**: `(Nmax, 1, batch)` — `Nmax` sorted particle positions per frame
-- **Output**: `(output_dim, batch)` where `output_dim = last(dims_rho)`
-- **Feature function**: `deep_set_feature(pts, Nmax)` — resamples the particle set to exactly `Nmax` positions (subsampling without replacement if `N > Nmax`, bootstrapping if `N < Nmax`)
-- **φ network**: MLP `1 → dims_phi[1] → … → dims_phi[end]`, all layers with `leakyrelu`
-- **ρ network**: MLP `dims_phi[end] → dims_rho[1] → … → dims_rho[end]`, `leakyrelu` on all but the last (linear) layer
-
-Controlled by `DeepSetFeaturizerHyperParams(phi_depth, phi_width_exponent, rho_depth, rho_width_exponent)`.
-
 ### Constructing a model
 
 ```julia
 # CNN featurizer (explicit)
 feat = CNNFeaturizer(; input_dim=64, kernel_dims=[5,5,5], nchannels=[16,32,64], rng)
-model = RNNDiagnostic(feat; dims_rnn=[128], dims_mlp=[64,32], rng)
-
-# Deep Sets featurizer (explicit)
-feat = DeepSetFeaturizer(; dims_phi=[64,128], dims_rho=[128,64], rng)
 model = RNNDiagnostic(feat; dims_rnn=[128], dims_mlp=[64,32], rng)
 
 # Via hyperparameter struct
@@ -125,20 +103,18 @@ model = RNNDiagnostic(hp; input_dim=64, rng)
 ### 1. Train
 
 ```bash
-julia main.jl
+julia --project=. hyperparameter_tuning/tune_neps.jl
 ```
 
-Runs a successive-halving tournament over CNN/LSTM/MLP depth and width combinations, eliminating half the candidates each round based on validation loss. Outputs `best_hope.jld2` with the winning model state.
+Runs NePS IfBO (In-context Freeze-Thaw Bayesian Optimization) over CNN architecture and training hyperparameters. Outputs results to `hyperparameter_tuning/neps_results_cnn/`.
 
 ### 2. Resume from checkpoint
 
-```julia
-# run_from_checkpoint.jl
-model_state = JLD2.load("best_hope.jld2", "model_state")
-model = load_rnn_from_state(input_dim, model_state)
+```bash
+julia --project=. retrain.jl <checkpoint>.jld2
 ```
 
-`load_rnn_from_state` detects the featurizer type automatically from the saved state (supports both CNN and Deep Sets checkpoints, as well as pre-refactor checkpoints with the legacy `cnn_encoder` field).
+`load_rnn_from_state` detects the architecture automatically from the saved state (supports both new-format checkpoints with a `featurizer` field, and pre-refactor checkpoints with the legacy `cnn_encoder` field).
 
 ### 3. Online inference
 
@@ -172,7 +148,7 @@ julia --project=. tests/runtests.jl
 
 ### 5. Hyperparameter optimization
 
-Two automated search strategies are provided in `hyperparameter_tuning/`. Both operate on a pre-generated **offline dataset** of FV trajectories, avoiding repeated simulation cost during the search.
+Hyperparameter search uses **NePS** (Neural Pipeline Search) with IfBO (In-context Freeze-Thaw Bayesian Optimization). It operates on a pre-generated **offline dataset** of FV trajectories, avoiding repeated simulation cost during the search.
 
 #### Step 0 — Generate the offline dataset
 
@@ -180,64 +156,19 @@ Two automated search strategies are provided in `hyperparameter_tuning/`. Both o
 julia --project=. hyperparameter_tuning/make_dataset.jl
 ```
 
-Writes `hyperparameter_tuning/hp_dataset.jld2` containing `train` and `test` splits used by both search scripts.
+Writes `hyperparameter_tuning/hp_dataset.jld2` containing `train` and `test` splits.
 
-#### Bayesian optimization (`tune_bo.jl`)
-
-Runs Bayesian optimization based [F18]((#refs)) hyperparameter search.
-Fits a GP surrogate (SE-ARD kernel, MAP hyperparameters) and selects candidates via Upper-Confidence-Bound acquisition. Each candidate is trained for a fixed number of epochs before its test loss is recorded. Runs a 7-dimensional CNN search (50 iterations) and a 9-dimensional DeepSet search (60 iterations) sequentially.
+#### Run the search
 
 ```bash
-julia --project=. hyperparameter_tuning/tune_bo.jl
+julia --project=. hyperparameter_tuning/tune_neps.jl
 ```
 
-Output files written to `hyperparameter_tuning/`:
+Searches over 8 hyperparameters (learning rate, CNN/RNN/MLP depth and width, input dimension) with epoch as the fidelity parameter. Results are saved to `hyperparameter_tuning/neps_results_cnn/`.
 
-| File | Contents |
-|------|----------|
-| `bo_results_cnn.jld2` | All tried `X`, `y`, best `x`/loss, per-candidate train/test curves and model states |
-| `bo_results_ds.jld2` | Same for the DeepSet search |
-| `best_hope_bo_cnn.jld2` | Best CNN model state after retraining on online data |
-| `best_hope_bo_ds.jld2` | Best DeepSet model state after retraining on online data |
-| `best_hope_bo.jld2` | Overall winner (CNN or DeepSet) |
-
-#### Freeze-thaw Bayesian optimization (`tune_ftbo.jl`)
-
-Runs freeze-thaw Bayesian optimization [SSA14]((#refs)).
-Maintains a pool of partially-trained configs and allocates training budget adaptively: promising configs get more epochs while clearly poor ones are abandoned early. Uses a product GP kernel (SE-ARD over hyperparameters × Freeze-Thaw over training time).
-
+Inspect results with:
 ```bash
-julia --project=. hyperparameter_tuning/tune_ftbo.jl
-```
-
-Output files written to `hyperparameter_tuning/`:
-
-| File | Contents |
-|------|----------|
-| `ftbo_results_cnn.jld2` | Full pool with training curves and model states, best config |
-| `ftbo_results_ds.jld2` | Same for the DeepSet search |
-| `ftbo_checkpoint_cnn.jld2` | Rolling checkpoint updated after each iteration (crash recovery) |
-| `ftbo_checkpoint_ds.jld2` | Same for the DeepSet search |
-
-#### Loading results for post-analysis
-
-```julia
-using JLD2
-
-# BO results
-bo = JLD2.load("hyperparameter_tuning/bo_results_cnn.jld2")
-# bo["X"]        — Vector of hyperparameter vectors tried
-# bo["y"]        — Corresponding negated test losses
-# bo["best_x"]   — Best hyperparameter vector
-# bo["best_loss"]— Best test loss
-# bo["history"]  — Vector of NamedTuples: (call, x, train_losses, test_losses, test_accs, model_state)
-
-# FTBO results
-ftbo = JLD2.load("hyperparameter_tuning/ftbo_results_cnn.jld2")
-# ftbo["pool"]             — Vector of (x, ts, losses, model_state) per explored config
-# ftbo["best_x"]           — Best hyperparameter vector
-# ftbo["best_loss"]        — Best observed validation loss
-# ftbo["best_model_state"] — Flux model state of the best config
+python -c "import neps; neps.status('hyperparameter_tuning/neps_results_cnn')"
 ```
 
 ## Key parameters
@@ -246,8 +177,8 @@ ftbo = JLD2.load("hyperparameter_tuning/ftbo_results_cnn.jld2")
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `input_dim` | 64 | Feature vector length (`Nmax` for Deep Sets, histogram bins for CNN) |
-| `feature` | `hist_feature` | Feature function: `hist_feature`, `ecdf_feature`, `tecdf_feature`, or `deep_set_feature` |
+| `input_dim` | 64 | Feature vector length (histogram bins for CNN) |
+| `feature` | `hist_feature` | Feature function: `hist_feature`, `ecdf_feature`, or `tecdf_feature` |
 | `stride_lims` | `(50, 50)` | Range `(min, max)` for the lag time stride τ; one value sampled uniformly per potential |
 | `Nreplicas_lims` | `(50, 50)` | Range `(min, max)` for the FV ensemble size N; one value sampled uniformly per trace |
 | `Ngrid` | 500 | Lattice discretization for the killed generator |
@@ -280,6 +211,3 @@ Setting `stride_lims=(a,b)` with `a < b` trains the model to be robust to variab
 - V98: [A. F. Voter, *Parallel Replica method for dynamics of infrequent events*, Physical Review B, 1998](https://journals.aps.org/prb/abstract/10.1103/PhysRevB.57.R13985)
 - BLS15: [A. Binder, T. Lelièvre, G. Simpson, *A generalized parallel replica dynamics*, Journal of Computational Physics, 2015](https://www.sciencedirect.com/science/article/pii/S0021999115000030)
 - BLS25: [N. Blassel, T. Lelièvre, G. Stoltz, *Quantitative spectral asymptotics for reversible diffusions in temperature-dependent domains*, arXiv preprint, 2025](https://arxiv.org/abs/2501.16082)
-- ZKS.al.17: [M. Zaheer, S. Kottur, S. Ravanbakhsh, B. Póczos, R. R. Salakhutdinov, A. J. Smola, *Deep Sets*, NeurIPS 2017](https://arxiv.org/abs/1703.06114)
-- F18: [P.I. Frazier, "A tutorial on Bayesian optimization", arXiv preprint, 2018](https://arxiv.org/abs/1807.02811)
-- SSA14: [K. Swersky, J. Snoek, R.P. Adams, "Freeze-thaw Bayesian optimization", arXiv preprint, 2014](https://arxiv.org/abs/1406.3896)
