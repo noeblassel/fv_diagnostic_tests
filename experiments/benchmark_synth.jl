@@ -143,10 +143,49 @@ outprefix = "$(prefix)$(ood_suffix)"
 println("βlims=$βlims  tol=$tol  Ngrid=$Ngrid  dt=$dt")
 println("Output prefix: $(outprefix)")
 
+# --- Method abstraction ---
+struct MethodConfig
+    json_prefix::String        # "" for NN, "gr_" for GR, etc.
+    tv_detect_prefix::String   # "nn_" for NN, same as json_prefix for others
+    alpha_values::Vector{Float64}
+    roc_thresholds::Vector{Float32}
+    naive_channel::Int         # 0 = NN (uses Yhat_prob), 1-3 = X_naive channel index
+    higher_is_positive::Bool   # true: score > α → converged; false: score < α → converged
+end
+
+function init_accum(ns, nn, na, nbins_time, nbins_detect)
+    (tp = zeros(Int, ns, nn, na), fp = zeros(Int, ns, nn, na),
+     tn = zeros(Int, ns, nn, na), fn = zeros(Int, ns, nn, na),
+     acc_numer = zeros(nbins_time, na), fpr_numer = zeros(nbins_time, na),
+     fnr_numer = zeros(nbins_time, na),
+     roc_samples = [Tuple{Float32,Float32}[] for _ in 1:ns, _ in 1:nn],
+     roc_samples_all = Tuple{Float32,Float32}[],
+     detect_hist = zeros(Int, nbins_detect, na),
+     detect_count = zeros(Int, ns, nn, na),
+     tv_detect_sum = zeros(ns, nn, na),
+     tv_detect_count = zeros(Int, ns, nn, na))
+end
+
+@inline function get_method_score(cfg::MethodConfig, k, j, Yhat_prob, X_naive)
+    cfg.naive_channel == 0 ? Yhat_prob[k, j] : X_naive[cfg.naive_channel, k, j]
+end
+
+@inline function is_positive(cfg::MethodConfig, score, threshold)
+    cfg.higher_is_positive ? (score > threshold) : (score < threshold)
+end
+
+function find_detection(cfg::MethodConfig, α, traj_len, j, Yhat_prob, X_naive)
+    if cfg.naive_channel == 0
+        findfirst(>(α), @view Yhat_prob[1:traj_len, j])
+    else
+        findfirst(<(α), @view X_naive[cfg.naive_channel, 1:traj_len, j])
+    end
+end
+
 function evaluate_grid(model, rng;
                        stride_values, Nreplicas_values,
                        num_batches, npot_per_batch, ntrace_per_pot,
-                       alpha_values, gr_alpha_values, w1_alpha_values, tv_alpha_values,
+                       methods::Vector{MethodConfig},
                        time_bins, nbins_time, ncorr,
                        detect_bins, nbins_detect,
                        input_dim=64, βlims=(1.0, 3.0),
@@ -155,545 +194,196 @@ function evaluate_grid(model, rng;
 
     ns = length(stride_values)
     nn = length(Nreplicas_values)
-    na = length(alpha_values)
-    na_gr = length(gr_alpha_values)
-    na_w1 = length(w1_alpha_values)
-    na_tv = length(tv_alpha_values)
+    accs = [init_accum(ns, nn, length(m.alpha_values), nbins_time, nbins_detect) for m in methods]
 
-    # --- NN accumulators ---
-    tp_grid = zeros(Int, ns, nn, na)
-    fp_grid = zeros(Int, ns, nn, na)
-    tn_grid = zeros(Int, ns, nn, na)
-    fn_grid = zeros(Int, ns, nn, na)
-
-    acc_numer = zeros(nbins_time, na)
-    fpr_numer = zeros(nbins_time, na)
-    fnr_numer = zeros(nbins_time, na)
-
-    roc_samples = [Tuple{Float32,Float32}[] for _ in 1:ns, _ in 1:nn]
-    roc_samples_all = Tuple{Float32,Float32}[]
-
-    detect_hist = zeros(Int, nbins_detect, na)
-
-    # --- GR accumulators ---
-    gr_tp_grid = zeros(Int, ns, nn, na_gr)
-    gr_fp_grid = zeros(Int, ns, nn, na_gr)
-    gr_tn_grid = zeros(Int, ns, nn, na_gr)
-    gr_fn_grid = zeros(Int, ns, nn, na_gr)
-
-    gr_acc_numer = zeros(nbins_time, na_gr)
-    gr_fpr_numer = zeros(nbins_time, na_gr)
-    gr_fnr_numer = zeros(nbins_time, na_gr)
-
-    gr_roc_samples = [Tuple{Float32,Float32}[] for _ in 1:ns, _ in 1:nn]
-    gr_roc_samples_all = Tuple{Float32,Float32}[]
-
-    gr_detect_hist = zeros(Int, nbins_detect, na_gr)
-
-    # --- W1 accumulators ---
-    w1_tp_grid = zeros(Int, ns, nn, na_w1)
-    w1_fp_grid = zeros(Int, ns, nn, na_w1)
-    w1_tn_grid = zeros(Int, ns, nn, na_w1)
-    w1_fn_grid = zeros(Int, ns, nn, na_w1)
-
-    w1_acc_numer = zeros(nbins_time, na_w1)
-    w1_fpr_numer = zeros(nbins_time, na_w1)
-    w1_fnr_numer = zeros(nbins_time, na_w1)
-
-    w1_roc_samples = [Tuple{Float32,Float32}[] for _ in 1:ns, _ in 1:nn]
-    w1_roc_samples_all = Tuple{Float32,Float32}[]
-
-    w1_detect_hist = zeros(Int, nbins_detect, na_w1)
-
-    # --- Oracle (TV from QSD) accumulators ---
-    tv_tp_grid = zeros(Int, ns, nn, na_tv)
-    tv_fp_grid = zeros(Int, ns, nn, na_tv)
-    tv_tn_grid = zeros(Int, ns, nn, na_tv)
-    tv_fn_grid = zeros(Int, ns, nn, na_tv)
-
-    tv_acc_numer = zeros(nbins_time, na_tv)
-    tv_fpr_numer = zeros(nbins_time, na_tv)
-    tv_fnr_numer = zeros(nbins_time, na_tv)
-
-    tv_roc_samples = [Tuple{Float32,Float32}[] for _ in 1:ns, _ in 1:nn]
-    tv_roc_samples_all = Tuple{Float32,Float32}[]
-
-    tv_detect_hist = zeros(Int, nbins_detect, na_tv)
-
-    # --- Per-cell trajectory and detection counts (for trigger/failure rates) ---
     traj_count_grid = zeros(Int, ns, nn)
-    detect_count_grid    = zeros(Int, ns, nn, na)
-    gr_detect_count_grid = zeros(Int, ns, nn, na_gr)
-    w1_detect_count_grid = zeros(Int, ns, nn, na_w1)
-    tv_detect_count_grid = zeros(Int, ns, nn, na_tv)
-
-    # --- TV at detection time accumulators ---
-    nn_tv_at_detect_sum   = zeros(ns, nn, na)
-    nn_tv_at_detect_count = zeros(Int, ns, nn, na)
-    gr_tv_at_detect_sum   = zeros(ns, nn, na_gr)
-    gr_tv_at_detect_count = zeros(Int, ns, nn, na_gr)
-    w1_tv_at_detect_sum   = zeros(ns, nn, na_w1)
-    w1_tv_at_detect_count = zeros(Int, ns, nn, na_w1)
-    tv_tv_at_detect_sum   = zeros(ns, nn, na_tv)
-    tv_tv_at_detect_count = zeros(Int, ns, nn, na_tv)
-
-    # --- Shared time-resolved denominators ---
     acc_denom = zeros(nbins_time)
     fpr_denom = zeros(nbins_time)
     fnr_denom = zeros(nbins_time)
 
-    total_cells = ns * nn * num_batches
-    p = Progress(total_cells; desc="Evaluating grid: ")
+    prog = Progress(ns * nn * num_batches; desc="Evaluating grid: ")
 
     for (si, s) in enumerate(stride_values)
         for (ni, N) in enumerate(Nreplicas_values)
             for b in 1:num_batches
                 X, Y, mask, X_naive = get_batch(rng;
-                    input_dim=input_dim,
-                    stride_lims=(s, s),
-                    Nreplicas_lims=(N, N),
-                    ncut=0,
-                    ncorr=ncorr,
-                    npot=npot_per_batch,
-                    ntrace=ntrace_per_pot,
-                    feature=hist_feature,
-                    βlims=βlims,
-                    tol=tol, Ngrid=Ngrid, dt=dt,
-                    true_tv=true,
+                    input_dim=input_dim, stride_lims=(s, s), Nreplicas_lims=(N, N),
+                    ncut=0, ncorr=ncorr, npot=npot_per_batch, ntrace=ntrace_per_pot,
+                    feature=hist_feature, βlims=βlims,
+                    tol=tol, Ngrid=Ngrid, dt=dt, true_tv=true,
                     potential_kwargs=potential_kwargs)
 
                 Flux.reset!(model)
                 Yhat_prob = Flux.σ(model(X))
-
                 ntraj = size(Y, 2)
 
                 for j in 1:ntraj
                     traj_len = sum(mask[:, j])
                     traj_len == 0 && continue
-
                     decorr_step = findfirst(==(1.0f0), Y[:, j])
                     decorr_step === nothing && continue
-
                     traj_count_grid[si, ni] += 1
 
+                    # --- Frame-level confusion matrix + time-resolved rates ---
                     for k in 1:traj_len
-                        prob = Yhat_prob[k, j]
-                        gr_val = X_naive[1, k, j]
-                        w1_val = X_naive[2, k, j]
-                        tv_val = X_naive[3, k, j]
                         true_pos = Y[k, j] == 1.0f0
                         tbin = get_bin(k / decorr_step, first(time_bins), last(time_bins), nbins_time)
 
-                        # Alpha-independent time denominators (shared)
                         acc_denom[tbin] += 1
-                        if !true_pos
-                            fpr_denom[tbin] += 1
-                        else
-                            fnr_denom[tbin] += 1
-                        end
+                        if !true_pos; fpr_denom[tbin] += 1; else; fnr_denom[tbin] += 1; end
 
-                        # NN: prob > alpha → converged
-                        for (ai, α) in enumerate(alpha_values)
-                            pred_pos = prob > α
-
-                            if pred_pos && true_pos
-                                tp_grid[si, ni, ai] += 1
-                            elseif pred_pos && !true_pos
-                                fp_grid[si, ni, ai] += 1
-                            elseif !pred_pos && true_pos
-                                fn_grid[si, ni, ai] += 1
-                            else
-                                tn_grid[si, ni, ai] += 1
-                            end
-
-                            acc_numer[tbin, ai] += (pred_pos == true_pos) ? 1 : 0
-                            if !true_pos
-                                fpr_numer[tbin, ai] += pred_pos ? 1 : 0
-                            else
-                                fnr_numer[tbin, ai] += !pred_pos ? 1 : 0
-                            end
-                        end
-
-                        # GR: small → converged
-                        for (ai, th) in enumerate(gr_alpha_values)
-                            pred_pos = gr_val < th
-
-                            if pred_pos && true_pos
-                                gr_tp_grid[si, ni, ai] += 1
-                            elseif pred_pos && !true_pos
-                                gr_fp_grid[si, ni, ai] += 1
-                            elseif !pred_pos && true_pos
-                                gr_fn_grid[si, ni, ai] += 1
-                            else
-                                gr_tn_grid[si, ni, ai] += 1
-                            end
-
-                            gr_acc_numer[tbin, ai] += (pred_pos == true_pos) ? 1 : 0
-                            if !true_pos
-                                gr_fpr_numer[tbin, ai] += pred_pos ? 1 : 0
-                            else
-                                gr_fnr_numer[tbin, ai] += !pred_pos ? 1 : 0
-                            end
-                        end
-
-                        # W1: small → converged
-                        for (ai, th) in enumerate(w1_alpha_values)
-                            pred_pos = w1_val < th
-
-                            if pred_pos && true_pos
-                                w1_tp_grid[si, ni, ai] += 1
-                            elseif pred_pos && !true_pos
-                                w1_fp_grid[si, ni, ai] += 1
-                            elseif !pred_pos && true_pos
-                                w1_fn_grid[si, ni, ai] += 1
-                            else
-                                w1_tn_grid[si, ni, ai] += 1
-                            end
-
-                            w1_acc_numer[tbin, ai] += (pred_pos == true_pos) ? 1 : 0
-                            if !true_pos
-                                w1_fpr_numer[tbin, ai] += pred_pos ? 1 : 0
-                            else
-                                w1_fnr_numer[tbin, ai] += !pred_pos ? 1 : 0
-                            end
-                        end
-
-                        # Oracle (TV from QSD): small → converged
-                        for (ai, th) in enumerate(tv_alpha_values)
-                            pred_pos = tv_val < th
-
-                            if pred_pos && true_pos
-                                tv_tp_grid[si, ni, ai] += 1
-                            elseif pred_pos && !true_pos
-                                tv_fp_grid[si, ni, ai] += 1
-                            elseif !pred_pos && true_pos
-                                tv_fn_grid[si, ni, ai] += 1
-                            else
-                                tv_tn_grid[si, ni, ai] += 1
-                            end
-
-                            tv_acc_numer[tbin, ai] += (pred_pos == true_pos) ? 1 : 0
-                            if !true_pos
-                                tv_fpr_numer[tbin, ai] += pred_pos ? 1 : 0
-                            else
-                                tv_fnr_numer[tbin, ai] += !pred_pos ? 1 : 0
+                        for (cfg, acc) in zip(methods, accs)
+                            score = get_method_score(cfg, k, j, Yhat_prob, X_naive)
+                            for (ai, α) in enumerate(cfg.alpha_values)
+                                pred_pos = is_positive(cfg, score, α)
+                                if pred_pos && true_pos;       acc.tp[si, ni, ai] += 1
+                                elseif pred_pos && !true_pos;  acc.fp[si, ni, ai] += 1
+                                elseif !pred_pos && true_pos;  acc.fn[si, ni, ai] += 1
+                                else;                          acc.tn[si, ni, ai] += 1; end
+                                acc.acc_numer[tbin, ai] += (pred_pos == true_pos) ? 1 : 0
+                                if !true_pos
+                                    acc.fpr_numer[tbin, ai] += pred_pos ? 1 : 0
+                                else
+                                    acc.fnr_numer[tbin, ai] += !pred_pos ? 1 : 0
+                                end
                             end
                         end
                     end
 
-                    # ROC: one independent sample per trajectory (between 0 and 2*tcorr)
+                    # --- ROC: one independent sample per trajectory ---
                     n_roc = min(traj_len, 2 * decorr_step)
                     k_roc = rand(rng, 1:n_roc)
                     true_label = Y[k_roc, j]
-
-                    # NN ROC
-                    push!(roc_samples[si, ni], (Yhat_prob[k_roc, j], true_label))
-                    push!(roc_samples_all, (Yhat_prob[k_roc, j], true_label))
-
-                    # Naive ROC: negate scores so compute_roc (uses >) works
-                    gr_score = -Float32(X_naive[1, k_roc, j])
-                    w1_score = -Float32(X_naive[2, k_roc, j])
-                    tv_score = -Float32(X_naive[3, k_roc, j])
-                    push!(gr_roc_samples[si, ni], (gr_score, true_label))
-                    push!(gr_roc_samples_all, (gr_score, true_label))
-                    push!(w1_roc_samples[si, ni], (w1_score, true_label))
-                    push!(w1_roc_samples_all, (w1_score, true_label))
-                    push!(tv_roc_samples[si, ni], (tv_score, true_label))
-                    push!(tv_roc_samples_all, (tv_score, true_label))
-
-                    # NN detection time + TV at detection
-                    for (ai, α) in enumerate(alpha_values)
-                        detect_frame = findfirst(>(α), @view Yhat_prob[1:traj_len, j])
-                        if detect_frame !== nothing
-                            detect_count_grid[si, ni, ai] += 1
-                            ratio = detect_frame / decorr_step
-                            tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
-                            detect_hist[tbin, ai] += 1
-                            nn_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[4, detect_frame, j])
-                            nn_tv_at_detect_count[si, ni, ai] += 1
-                        end
+                    for (cfg, acc) in zip(methods, accs)
+                        raw = get_method_score(cfg, k_roc, j, Yhat_prob, X_naive)
+                        s = cfg.higher_is_positive ? Float32(raw) : -Float32(raw)
+                        push!(acc.roc_samples[si, ni], (s, true_label))
+                        push!(acc.roc_samples_all, (s, true_label))
                     end
 
-                    # GR detection time + TV at detection
-                    for (ai, th) in enumerate(gr_alpha_values)
-                        detect_frame = findfirst(<(th), @view X_naive[1, 1:traj_len, j])
-                        if detect_frame !== nothing
-                            gr_detect_count_grid[si, ni, ai] += 1
-                            ratio = detect_frame / decorr_step
-                            tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
-                            gr_detect_hist[tbin, ai] += 1
-                            gr_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[4, detect_frame, j])
-                            gr_tv_at_detect_count[si, ni, ai] += 1
-                        end
-                    end
-
-                    # W1 detection time + TV at detection
-                    for (ai, th) in enumerate(w1_alpha_values)
-                        detect_frame = findfirst(<(th), @view X_naive[2, 1:traj_len, j])
-                        if detect_frame !== nothing
-                            w1_detect_count_grid[si, ni, ai] += 1
-                            ratio = detect_frame / decorr_step
-                            tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
-                            w1_detect_hist[tbin, ai] += 1
-                            w1_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[4, detect_frame, j])
-                            w1_tv_at_detect_count[si, ni, ai] += 1
-                        end
-                    end
-
-                    # Oracle (TV) detection time + TV at detection
-                    for (ai, th) in enumerate(tv_alpha_values)
-                        detect_frame = findfirst(<(th), @view X_naive[3, 1:traj_len, j])
-                        if detect_frame !== nothing
-                            tv_detect_count_grid[si, ni, ai] += 1
-                            ratio = detect_frame / decorr_step
-                            tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
-                            tv_detect_hist[tbin, ai] += 1
-                            tv_tv_at_detect_sum[si, ni, ai] += Float64(X_naive[4, detect_frame, j])
-                            tv_tv_at_detect_count[si, ni, ai] += 1
+                    # --- Detection time + TV at detection ---
+                    for (cfg, acc) in zip(methods, accs)
+                        for (ai, α) in enumerate(cfg.alpha_values)
+                            detect_frame = find_detection(cfg, α, traj_len, j, Yhat_prob, X_naive)
+                            if detect_frame !== nothing
+                                acc.detect_count[si, ni, ai] += 1
+                                ratio = detect_frame / decorr_step
+                                tbin = get_bin(ratio, first(detect_bins), last(detect_bins), nbins_detect)
+                                acc.detect_hist[tbin, ai] += 1
+                                acc.tv_detect_sum[si, ni, ai] += Float64(X_naive[4, detect_frame, j])
+                                acc.tv_detect_count[si, ni, ai] += 1
+                            end
                         end
                     end
                 end
 
-                next!(p)
+                next!(prog)
             end
         end
     end
 
-    # --- NN derived grid metrics ---
-    total_grid = tp_grid .+ fp_grid .+ tn_grid .+ fn_grid
-    acc_grid = (tp_grid .+ tn_grid) ./ max.(total_grid, 1)
-    fpr_grid = fp_grid ./ max.(fp_grid .+ tn_grid, 1)
-    fnr_grid = fn_grid ./ max.(fn_grid .+ tp_grid, 1)
-
-    # --- GR derived grid metrics ---
-    gr_total = gr_tp_grid .+ gr_fp_grid .+ gr_tn_grid .+ gr_fn_grid
-    gr_acc_grid = (gr_tp_grid .+ gr_tn_grid) ./ max.(gr_total, 1)
-    gr_fpr_grid = gr_fp_grid ./ max.(gr_fp_grid .+ gr_tn_grid, 1)
-    gr_fnr_grid = gr_fn_grid ./ max.(gr_fn_grid .+ gr_tp_grid, 1)
-
-    # --- W1 derived grid metrics ---
-    w1_total = w1_tp_grid .+ w1_fp_grid .+ w1_tn_grid .+ w1_fn_grid
-    w1_acc_grid = (w1_tp_grid .+ w1_tn_grid) ./ max.(w1_total, 1)
-    w1_fpr_grid = w1_fp_grid ./ max.(w1_fp_grid .+ w1_tn_grid, 1)
-    w1_fnr_grid = w1_fn_grid ./ max.(w1_fn_grid .+ w1_tp_grid, 1)
-
-    # --- Oracle (TV) derived grid metrics ---
-    tv_total = tv_tp_grid .+ tv_fp_grid .+ tv_tn_grid .+ tv_fn_grid
-    tv_acc_grid = (tv_tp_grid .+ tv_tn_grid) ./ max.(tv_total, 1)
-    tv_fpr_grid = tv_fp_grid ./ max.(tv_fp_grid .+ tv_tn_grid, 1)
-    tv_fnr_grid = tv_fn_grid ./ max.(tv_fn_grid .+ tv_tp_grid, 1)
-
-    # --- TV at detection: mean per method ---
-    nn_tv_at_detect = nn_tv_at_detect_sum ./ max.(nn_tv_at_detect_count, 1)
-    gr_tv_at_detect = gr_tv_at_detect_sum ./ max.(gr_tv_at_detect_count, 1)
-    w1_tv_at_detect = w1_tv_at_detect_sum ./ max.(w1_tv_at_detect_count, 1)
-    tv_tv_at_detect = tv_tv_at_detect_sum ./ max.(tv_tv_at_detect_count, 1)
-
-    # --- NN per-cell AUC ---
-    auc_grid = zeros(ns, nn)
-    roc_per_cell = Matrix{Any}(undef, ns, nn)
-    for si in 1:ns, ni in 1:nn
-        samples = roc_samples[si, ni]
-        if length(samples) > 0
-            scores = [s[1] for s in samples]
-            labels = [s[2] for s in samples]
-            roc_result = compute_roc(scores, labels)
-            auc_grid[si, ni] = roc_result.auc
-            roc_per_cell[si, ni] = roc_result
-        else
-            auc_grid[si, ni] = NaN
-            roc_per_cell[si, ni] = (fpr=Float64[], tpr=Float64[], auc=NaN)
-        end
-    end
-
-    # --- GR/W1/TV per-cell AUC ---
-    gr_auc_grid = zeros(ns, nn)
-    w1_auc_grid = zeros(ns, nn)
-    tv_auc_grid = zeros(ns, nn)
-    gr_roc_thresholds = collect(-0.2f0:0.002f0:0.0f0)
-    w1_roc_thresholds = collect(-1.0f0:0.005f0:0.0f0)
-    tv_roc_thresholds = collect(-2.0f0:0.01f0:0.0f0)
-
-    for si in 1:ns, ni in 1:nn
-        gr_s = gr_roc_samples[si, ni]
-        if length(gr_s) > 0
-            gr_auc_grid[si, ni] = compute_roc([s[1] for s in gr_s], [s[2] for s in gr_s]; thresholds=gr_roc_thresholds).auc
-        else
-            gr_auc_grid[si, ni] = NaN
-        end
-
-        w1_s = w1_roc_samples[si, ni]
-        if length(w1_s) > 0
-            w1_auc_grid[si, ni] = compute_roc([s[1] for s in w1_s], [s[2] for s in w1_s]; thresholds=w1_roc_thresholds).auc
-        else
-            w1_auc_grid[si, ni] = NaN
-        end
-
-        tv_s = tv_roc_samples[si, ni]
-        if length(tv_s) > 0
-            tv_auc_grid[si, ni] = compute_roc([s[1] for s in tv_s], [s[2] for s in tv_s]; thresholds=tv_roc_thresholds).auc
-        else
-            tv_auc_grid[si, ni] = NaN
-        end
-    end
-
-    # --- Global ROC ---
-    global_roc = compute_roc([s[1] for s in roc_samples_all], [s[2] for s in roc_samples_all])
-    gr_global_roc = compute_roc([s[1] for s in gr_roc_samples_all], [s[2] for s in gr_roc_samples_all]; thresholds=gr_roc_thresholds)
-    w1_global_roc = compute_roc([s[1] for s in w1_roc_samples_all], [s[2] for s in w1_roc_samples_all]; thresholds=w1_roc_thresholds)
-    tv_global_roc = compute_roc([s[1] for s in tv_roc_samples_all], [s[2] for s in tv_roc_samples_all]; thresholds=tv_roc_thresholds)
-
-    # --- Time-resolved rates ---
-    acc_time = acc_numer ./ max.(acc_denom, 1)
-    fpr_time = fpr_numer ./ max.(fpr_denom, 1)
-    fnr_time = fnr_numer ./ max.(fnr_denom, 1)
-
-    gr_acc_time = gr_acc_numer ./ max.(acc_denom, 1)
-    gr_fpr_time = gr_fpr_numer ./ max.(fpr_denom, 1)
-    gr_fnr_time = gr_fnr_numer ./ max.(fnr_denom, 1)
-
-    w1_acc_time = w1_acc_numer ./ max.(acc_denom, 1)
-    w1_fpr_time = w1_fpr_numer ./ max.(fpr_denom, 1)
-    w1_fnr_time = w1_fnr_numer ./ max.(fnr_denom, 1)
-
-    tv_acc_time = tv_acc_numer ./ max.(acc_denom, 1)
-    tv_fpr_time = tv_fpr_numer ./ max.(fpr_denom, 1)
-    tv_fnr_time = tv_fnr_numer ./ max.(fnr_denom, 1)
-
-    # AUC statistics
-    valid_aucs = filter(!isnan, vec(auc_grid))
-    mean_auc = isempty(valid_aucs) ? NaN : mean(valid_aucs)
-    std_auc  = isempty(valid_aucs) ? NaN : std(valid_aucs)
-
-    gr_valid_aucs = filter(!isnan, vec(gr_auc_grid))
-    gr_mean_auc = isempty(gr_valid_aucs) ? NaN : mean(gr_valid_aucs)
-    gr_std_auc  = isempty(gr_valid_aucs) ? NaN : std(gr_valid_aucs)
-
-    w1_valid_aucs = filter(!isnan, vec(w1_auc_grid))
-    w1_mean_auc = isempty(w1_valid_aucs) ? NaN : mean(w1_valid_aucs)
-    w1_std_auc  = isempty(w1_valid_aucs) ? NaN : std(w1_valid_aucs)
-
-    tv_valid_aucs = filter(!isnan, vec(tv_auc_grid))
-    tv_mean_auc = isempty(tv_valid_aucs) ? NaN : mean(tv_valid_aucs)
-    tv_std_auc  = isempty(tv_valid_aucs) ? NaN : std(tv_valid_aucs)
-
-    return (
-        # NN grid metrics
-        acc_grid   = acc_grid,
-        fpr_grid   = fpr_grid,
-        fnr_grid   = fnr_grid,
-        auc_grid   = auc_grid,
-        total_grid = total_grid,
-        # NN time-resolved
-        acc_time  = acc_time,
-        fpr_time  = fpr_time,
-        fnr_time  = fnr_time,
-        # NN detection time
-        detect_hist = detect_hist,
-        detect_bins = collect(detect_bins),
-        # NN ROC
-        roc_fpr        = global_roc.fpr,
-        roc_tpr        = global_roc.tpr,
-        roc_thresholds = collect(0.01f0:0.01f0:0.99f0),
-        mean_auc       = mean_auc,
-        std_auc        = std_auc,
-        global_auc     = global_roc.auc,
-        roc_per_cell   = roc_per_cell,
-
-        # GR grid metrics
-        gr_acc_grid = gr_acc_grid,
-        gr_fpr_grid = gr_fpr_grid,
-        gr_fnr_grid = gr_fnr_grid,
-        gr_auc_grid = gr_auc_grid,
-        # GR time-resolved
-        gr_acc_time = gr_acc_time,
-        gr_fpr_time = gr_fpr_time,
-        gr_fnr_time = gr_fnr_time,
-        # GR detection time
-        gr_detect_hist = gr_detect_hist,
-        # GR ROC
-        gr_roc_fpr = gr_global_roc.fpr,
-        gr_roc_tpr = gr_global_roc.tpr,
-        gr_global_auc = gr_global_roc.auc,
-        gr_mean_auc = gr_mean_auc,
-        gr_std_auc = gr_std_auc,
-
-        # W1 grid metrics
-        w1_acc_grid = w1_acc_grid,
-        w1_fpr_grid = w1_fpr_grid,
-        w1_fnr_grid = w1_fnr_grid,
-        w1_auc_grid = w1_auc_grid,
-        # W1 time-resolved
-        w1_acc_time = w1_acc_time,
-        w1_fpr_time = w1_fpr_time,
-        w1_fnr_time = w1_fnr_time,
-        # W1 detection time
-        w1_detect_hist = w1_detect_hist,
-        # W1 ROC
-        w1_roc_fpr = w1_global_roc.fpr,
-        w1_roc_tpr = w1_global_roc.tpr,
-        w1_global_auc = w1_global_roc.auc,
-        w1_mean_auc = w1_mean_auc,
-        w1_std_auc = w1_std_auc,
-
-        # Oracle (TV) grid metrics
-        tv_acc_grid = tv_acc_grid,
-        tv_fpr_grid = tv_fpr_grid,
-        tv_fnr_grid = tv_fnr_grid,
-        tv_auc_grid = tv_auc_grid,
-        # Oracle time-resolved
-        tv_acc_time = tv_acc_time,
-        tv_fpr_time = tv_fpr_time,
-        tv_fnr_time = tv_fnr_time,
-        # Oracle detection time
-        tv_detect_hist = tv_detect_hist,
-        # Oracle ROC
-        tv_roc_fpr = tv_global_roc.fpr,
-        tv_roc_tpr = tv_global_roc.tpr,
-        tv_global_auc = tv_global_roc.auc,
-        tv_mean_auc = tv_mean_auc,
-        tv_std_auc = tv_std_auc,
-
-        # TV at detection (mean per method per threshold per cell)
-        nn_tv_at_detect = nn_tv_at_detect,
-        gr_tv_at_detect = gr_tv_at_detect,
-        w1_tv_at_detect = w1_tv_at_detect,
-        tv_tv_at_detect = tv_tv_at_detect,
-
-        # Trajectory / detection counts
-        traj_count_grid       = traj_count_grid,
-        detect_count_grid     = detect_count_grid,
-        gr_detect_count_grid  = gr_detect_count_grid,
-        w1_detect_count_grid  = w1_detect_count_grid,
-        tv_detect_count_grid  = tv_detect_count_grid,
-
-        # Shared
-        acc_denom = acc_denom,
-        fpr_denom = fpr_denom,
-        fnr_denom = fnr_denom,
-        stride_values    = stride_values,
-        Nreplicas_values = Nreplicas_values,
-        time_bins        = collect(time_bins),
-        alpha_values     = alpha_values,
-        gr_alpha_values  = gr_alpha_values,
-        w1_alpha_values  = w1_alpha_values,
-        tv_alpha_values  = tv_alpha_values,
+    # --- Derive metrics and build JSON dict ---
+    json_data = Dict{String,Any}(
+        "stride_values"    => stride_values,
+        "Nreplicas_values" => Nreplicas_values,
+        "time_bins"        => collect(time_bins),
+        "detect_bins"      => collect(detect_bins),
+        "acc_denom"        => acc_denom,
+        "fpr_denom"        => fpr_denom,
+        "fnr_denom"        => fnr_denom,
+        "traj_count_grid"  => traj_count_grid,
     )
+
+    for (cfg, acc) in zip(methods, accs)
+        p  = cfg.json_prefix
+        tp = cfg.tv_detect_prefix
+
+        # Grid metrics
+        total    = acc.tp .+ acc.fp .+ acc.tn .+ acc.fn
+        acc_grid = (acc.tp .+ acc.tn) ./ max.(total, 1)
+        fpr_grid = acc.fp ./ max.(acc.fp .+ acc.tn, 1)
+        fnr_grid = acc.fn ./ max.(acc.fn .+ acc.tp, 1)
+
+        # Time-resolved rates
+        acc_time = acc.acc_numer ./ max.(acc_denom, 1)
+        fpr_time = acc.fpr_numer ./ max.(fpr_denom, 1)
+        fnr_time = acc.fnr_numer ./ max.(fnr_denom, 1)
+
+        # Per-cell AUC
+        auc_grid = zeros(ns, nn)
+        for si in 1:ns, ni in 1:nn
+            samples = acc.roc_samples[si, ni]
+            if !isempty(samples)
+                auc_grid[si, ni] = compute_roc(
+                    [s[1] for s in samples], [s[2] for s in samples];
+                    thresholds=cfg.roc_thresholds).auc
+            else
+                auc_grid[si, ni] = NaN
+            end
+        end
+
+        # Global ROC
+        global_roc = compute_roc(
+            [s[1] for s in acc.roc_samples_all],
+            [s[2] for s in acc.roc_samples_all];
+            thresholds=cfg.roc_thresholds)
+
+        # AUC statistics
+        valid_aucs = filter(!isnan, vec(auc_grid))
+        mean_auc_val = isempty(valid_aucs) ? NaN : mean(valid_aucs)
+        std_auc_val  = isempty(valid_aucs) ? NaN : std(valid_aucs)
+
+        # TV at detection
+        tv_at_detect = acc.tv_detect_sum ./ max.(acc.tv_detect_count, 1)
+
+        # Write to JSON dict
+        json_data["$(p)acc_grid"]          = acc_grid
+        json_data["$(p)fpr_grid"]          = fpr_grid
+        json_data["$(p)fnr_grid"]          = fnr_grid
+        json_data["$(p)auc_grid"]          = auc_grid
+        json_data["$(p)acc_time"]          = acc_time
+        json_data["$(p)fpr_time"]          = fpr_time
+        json_data["$(p)fnr_time"]          = fnr_time
+        json_data["$(p)detect_hist"]       = acc.detect_hist
+        json_data["$(p)roc_fpr"]           = global_roc.fpr
+        json_data["$(p)roc_tpr"]           = global_roc.tpr
+        json_data["$(p)global_auc"]        = global_roc.auc
+        json_data["$(p)mean_auc"]          = mean_auc_val
+        json_data["$(p)std_auc"]           = std_auc_val
+        json_data["$(tp)tv_at_detect"]     = tv_at_detect
+        json_data["$(p)detect_count_grid"] = acc.detect_count
+
+        # NN-specific extra keys (no prefix)
+        if p == ""
+            json_data["total_grid"]     = total
+            json_data["roc_thresholds"] = collect(cfg.roc_thresholds)
+            json_data["alpha_values"]   = cfg.alpha_values
+        else
+            json_data["$(p)alpha_values"] = cfg.alpha_values
+        end
+    end
+
+    return json_data
 end
+
+# --- Define methods ---
+methods = MethodConfig[
+    MethodConfig("",    "nn_", Float64.(alpha_values),    collect(0.01f0:0.01f0:0.99f0), 0, true),
+    MethodConfig("gr_", "gr_", Float64.(gr_alpha_values), collect(-0.2f0:0.002f0:0.0f0), 1, false),
+    MethodConfig("w1_", "w1_", Float64.(w1_alpha_values), collect(-1.0f0:0.005f0:0.0f0), 2, false),
+    MethodConfig("tv_", "tv_", Float64.(tv_alpha_values), collect(-2.0f0:0.01f0:0.0f0),  3, false),
+]
 
 # --- Run evaluation ---
 println("Starting benchmark evaluation...")
 t0 = now()
-results = evaluate_grid(model, rng;
+json_data = evaluate_grid(model, rng;
     stride_values    = stride_values,
     Nreplicas_values = Nreplicas_values,
     num_batches      = num_batches,
     npot_per_batch   = npot_per_batch,
     ntrace_per_pot   = ntrace_per_pot,
-    alpha_values     = alpha_values,
-    gr_alpha_values  = gr_alpha_values,
-    w1_alpha_values  = w1_alpha_values,
-    tv_alpha_values  = tv_alpha_values,
+    methods          = methods,
     time_bins        = time_bins,
     nbins_time       = nbins_time,
     ncorr            = ncorr,
@@ -708,90 +398,7 @@ results = evaluate_grid(model, rng;
 t1 = now()
 println("Evaluation completed in $(t1 - t0)")
 
-# --- Save JSON results ---
-json_data = Dict(
-    # NN
-    "acc_grid"          => results.acc_grid,
-    "fpr_grid"          => results.fpr_grid,
-    "fnr_grid"          => results.fnr_grid,
-    "auc_grid"          => results.auc_grid,
-    "total_grid"        => results.total_grid,
-    "acc_time"          => results.acc_time,
-    "fpr_time"          => results.fpr_time,
-    "fnr_time"          => results.fnr_time,
-    "acc_denom"         => results.acc_denom,
-    "fpr_denom"         => results.fpr_denom,
-    "fnr_denom"         => results.fnr_denom,
-    "detect_hist"       => results.detect_hist,
-    "detect_bins"       => results.detect_bins,
-    "roc_fpr"           => results.roc_fpr,
-    "roc_tpr"           => results.roc_tpr,
-    "roc_thresholds"    => results.roc_thresholds,
-    "mean_auc"          => results.mean_auc,
-    "std_auc"           => results.std_auc,
-    "global_auc"        => results.global_auc,
-    "stride_values"     => results.stride_values,
-    "Nreplicas_values"  => results.Nreplicas_values,
-    "time_bins"         => results.time_bins,
-    "alpha_values"      => results.alpha_values,
-    "ood_config"        => ood_config,
-    # GR
-    "gr_acc_grid"       => results.gr_acc_grid,
-    "gr_fpr_grid"       => results.gr_fpr_grid,
-    "gr_fnr_grid"       => results.gr_fnr_grid,
-    "gr_auc_grid"       => results.gr_auc_grid,
-    "gr_acc_time"       => results.gr_acc_time,
-    "gr_fpr_time"       => results.gr_fpr_time,
-    "gr_fnr_time"       => results.gr_fnr_time,
-    "gr_detect_hist"    => results.gr_detect_hist,
-    "gr_roc_fpr"        => results.gr_roc_fpr,
-    "gr_roc_tpr"        => results.gr_roc_tpr,
-    "gr_global_auc"     => results.gr_global_auc,
-    "gr_mean_auc"       => results.gr_mean_auc,
-    "gr_std_auc"        => results.gr_std_auc,
-    "gr_alpha_values"   => results.gr_alpha_values,
-    # W1
-    "w1_acc_grid"       => results.w1_acc_grid,
-    "w1_fpr_grid"       => results.w1_fpr_grid,
-    "w1_fnr_grid"       => results.w1_fnr_grid,
-    "w1_auc_grid"       => results.w1_auc_grid,
-    "w1_acc_time"       => results.w1_acc_time,
-    "w1_fpr_time"       => results.w1_fpr_time,
-    "w1_fnr_time"       => results.w1_fnr_time,
-    "w1_detect_hist"    => results.w1_detect_hist,
-    "w1_roc_fpr"        => results.w1_roc_fpr,
-    "w1_roc_tpr"        => results.w1_roc_tpr,
-    "w1_global_auc"     => results.w1_global_auc,
-    "w1_mean_auc"       => results.w1_mean_auc,
-    "w1_std_auc"        => results.w1_std_auc,
-    "w1_alpha_values"   => results.w1_alpha_values,
-    # Oracle (TV)
-    "tv_acc_grid"       => results.tv_acc_grid,
-    "tv_fpr_grid"       => results.tv_fpr_grid,
-    "tv_fnr_grid"       => results.tv_fnr_grid,
-    "tv_auc_grid"       => results.tv_auc_grid,
-    "tv_acc_time"       => results.tv_acc_time,
-    "tv_fpr_time"       => results.tv_fpr_time,
-    "tv_fnr_time"       => results.tv_fnr_time,
-    "tv_detect_hist"    => results.tv_detect_hist,
-    "tv_roc_fpr"        => results.tv_roc_fpr,
-    "tv_roc_tpr"        => results.tv_roc_tpr,
-    "tv_global_auc"     => results.tv_global_auc,
-    "tv_mean_auc"       => results.tv_mean_auc,
-    "tv_std_auc"        => results.tv_std_auc,
-    "tv_alpha_values"   => results.tv_alpha_values,
-    # TV at detection
-    "nn_tv_at_detect"   => results.nn_tv_at_detect,
-    "gr_tv_at_detect"   => results.gr_tv_at_detect,
-    "w1_tv_at_detect"   => results.w1_tv_at_detect,
-    "tv_tv_at_detect"   => results.tv_tv_at_detect,
-    # Trajectory / detection counts
-    "traj_count_grid"       => results.traj_count_grid,
-    "detect_count_grid"     => results.detect_count_grid,
-    "gr_detect_count_grid"  => results.gr_detect_count_grid,
-    "w1_detect_count_grid"  => results.w1_detect_count_grid,
-    "tv_detect_count_grid"  => results.tv_detect_count_grid,
-)
+json_data["ood_config"] = ood_config
 
 open("$(outprefix)_benchmark_results.json", "w") do f
     write(f, JSON.json(json_data; allownan=true))

@@ -11,15 +11,12 @@ module FVDiagnosticTests
     include("./generate_data.jl")
     include("./lstm.jl")
     include("./train_lstm.jl")
-    include("./tournament.jl")
 
     export generate_potential, comp_generator, comp_qsd, tv_trace, conv_tv, sim_fv, hist_feature, ecdf_feature, tecdf_feature, get_batch
     export AbstractFeaturizer, CNNFeaturizer
     export CNNFeaturizerHyperParams
     export RNNDiagnostic, RNNDiagnosticHyperParams, RNNDiagnosticOnline, load_rnn_from_state, reset_rnn_state!
-    export FRNNCell, FRNNDiagnostic
     export TrainingRun, test_accuracy!, run_epoch!
-    export build_candidate_run, run_tournament!
 
 
 end
